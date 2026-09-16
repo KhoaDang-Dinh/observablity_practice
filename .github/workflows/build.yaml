@@ -8,7 +8,7 @@ on:
       - "app/**"
       - "infra/terraform/**"
       - "argocd/**"
-      - ".github/workflows/day3.yml"
+      - ".github/workflows/build.yaml"
 
 concurrency:
   group: day3-dev
@@ -87,8 +87,6 @@ jobs:
 
       - name: Terraform Plan
         working-directory: ${{ env.TF_DIR }}
-        env:
-          TF_VAR_github_repository: ${{ github.repository }}
         run: |
           terraform plan \
             -input=false \
@@ -97,8 +95,6 @@ jobs:
 
       - name: Terraform Apply
         working-directory: ${{ env.TF_DIR }}
-        env:
-          TF_VAR_github_repository: ${{ github.repository }}
         run: |
           terraform apply \
             -input=false \

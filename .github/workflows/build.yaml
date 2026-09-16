@@ -1,0 +1,357 @@
+name: Day 3 - Terraform, EKS, CI-CD and LGTM
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [dev]
+    paths:
+      - "app/**"
+      - "infra/terraform/**"
+      - "argocd/**"
+      - ".github/workflows/day3.yml"
+
+concurrency:
+  group: day3-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REPOSITORY: day3-backend
+  TF_DIR: infra/terraform
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_STATE_KEY: terraform/day3/dev/terraform.tfstate
+  TERRAFORM_VERSION: 1.16.2
+  ARGOCD_VERSION: v3.5.3
+
+jobs:
+  infrastructure:
+    name: Terraform Infrastructure
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/dev'
+    outputs:
+      cluster_name: ${{ steps.tf-output.outputs.cluster_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate workflow configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$TF_STATE_BUCKET" ]; then
+            echo "GitHub variable TF_STATE_BUCKET is missing."
+            exit 1
+          fi
+          echo "Terraform state bucket configured."
+          echo "State key: $TF_STATE_KEY"
+
+      - name: Configure Terraform AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: terraform-${{ github.run_id }}
+
+      - name: Show Terraform AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${TF_STATE_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform Format
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_github_repository: ${{ github.repository }}
+        run: |
+          terraform plan \
+            -input=false \
+            -lock-timeout=5m \
+            -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_github_repository: ${{ github.repository }}
+        run: |
+          terraform apply \
+            -input=false \
+            -lock-timeout=5m \
+            -auto-approve \
+            tfplan
+
+      - name: Export Terraform Outputs
+        id: tf-output
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set -euo pipefail
+          CLUSTER_NAME="$(terraform output -raw cluster_name)"
+          test -n "$CLUSTER_NAME"
+          echo "cluster_name=$CLUSTER_NAME" >> "$GITHUB_OUTPUT"
+          echo "EKS cluster: $CLUSTER_NAME"
+
+  build:
+    name: Build and Publish Backend
+    runs-on: ubuntu-latest
+    needs: [infrastructure]
+    steps:
+      - name: Checkout Dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Configure ECR AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ecr-${{ github.run_id }}
+
+      - name: Show ECR AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Backend Image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${TAG}"
+          docker build --pull -t "$IMAGE" ./app
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Push Backend Image
+        run: docker push "$IMAGE"
+
+      - name: Update GitOps Manifest
+        run: |
+          set -euo pipefail
+          sed -i -E "s#image: .*/day3-backend:[^ ]+#image: ${IMAGE}#" deploy/dev/backend.yaml
+          sed -i -E "s#value: (bootstrap|[0-9a-f]{40})#value: ${GITHUB_SHA}#" deploy/dev/backend.yaml
+          grep "image:" deploy/dev/backend.yaml
+
+      - name: Commit Desired State
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deploy/dev/backend.yaml
+          if git diff --cached --quiet; then
+            echo "Desired state already current."
+            exit 0
+          fi
+          git commit -m "deploy backend ${GITHUB_SHA} [skip ci]"
+          git push origin HEAD:dev
+
+  kubernetes-bootstrap:
+    name: Bootstrap Kubernetes
+    runs-on: ubuntu-latest
+    needs: [infrastructure, build]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Configure EKS AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: eks-${{ github.run_id }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v5.1.0
+        with:
+          version: latest
+
+      - name: Configure EKS kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "${{ needs.infrastructure.outputs.cluster_name }}"
+
+      - name: Verify Kubernetes API
+        run: kubectl cluster-info
+
+      - name: Wait for EKS Worker Nodes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in {1..60}; do
+            NODE_COUNT="$(kubectl get nodes --no-headers 2>/dev/null | wc -l)"
+            if [ "$NODE_COUNT" -gt 0 ]; then
+              kubectl wait --for=condition=Ready node --all --timeout=10m
+              exit 0
+            fi
+            echo "No worker node yet. Attempt $i/60"
+            sleep 10
+          done
+          echo "No worker nodes joined EKS."
+          exit 1
+
+      - name: Show Nodes
+        run: kubectl get nodes -o wide
+
+      - name: Show EKS System Pods
+        run: kubectl get pods -n kube-system -o wide
+
+      - name: Create Namespaces
+        run: |
+          kubectl create namespace application --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create namespace observability --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Check Argo CD
+        id: argocd-check
+        shell: bash
+        run: |
+          if kubectl get deployment argocd-server -n argocd >/dev/null 2>&1; then
+            echo "installed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "installed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Argo CD
+        if: steps.argocd-check.outputs.installed == 'false'
+        run: |
+          kubectl apply \
+            --server-side \
+            --force-conflicts \
+            -n argocd \
+            -f "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml"
+
+      - name: Wait for Argo CD Server
+        run: |
+          kubectl rollout status deployment/argocd-server -n argocd --timeout=10m
+
+      - name: Create or Update Argo CD Application
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: day3
+            namespace: argocd
+          spec:
+            project: default
+            source:
+              repoURL: https://github.com/${REPOSITORY}.git
+              targetRevision: dev
+              path: deploy/dev
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: application
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+          EOF
+
+      - name: Show Argo CD
+        run: |
+          kubectl get pods -n argocd
+          kubectl get application day3 -n argocd -o wide
+
+  verify:
+    name: Verify Deployment and Observability
+    runs-on: ubuntu-latest
+    needs: [infrastructure, kubernetes-bootstrap]
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: verify-${{ github.run_id }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v5.1.0
+        with:
+          version: latest
+
+      - name: Configure EKS kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "${{ needs.infrastructure.outputs.cluster_name }}"
+
+      - name: Wait for Argo CD to Create Backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in {1..60}; do
+            if kubectl get deployment backend -n application >/dev/null 2>&1; then
+              echo "Backend Deployment exists."
+              exit 0
+            fi
+            echo "Waiting for Argo CD sync... $i/60"
+            sleep 10
+          done
+          echo "Backend Deployment was not created."
+          exit 1
+
+      - name: Wait for Backend Rollout
+        run: |
+          kubectl rollout status deployment/backend -n application --timeout=10m
+
+      - name: Show Application
+        run: |
+          kubectl get pods -n application -o wide
+          kubectl get svc -n application
+
+      - name: Show Observability Stack
+        run: |
+          kubectl get pods -n observability -o wide || true
+          kubectl get svc -n observability || true
+
+      - name: Resource Usage
+        run: |
+          echo "=== APPLICATION ==="
+          kubectl top pods -n application || true
+          echo "=== OBSERVABILITY ==="
+          kubectl top pods -n observability || true
+          echo "=== NODES ==="
+          kubectl top nodes || true
+
+      - name: Show Argo CD Application Status
+        run: |
+          kubectl get application day3 -n argocd -o wide
+          kubectl get application day3 -n argocd \
+            -o jsonpath='Sync: {.status.sync.status}{"\n"}Health: {.status.health.status}{"\n"}' \
+            || true

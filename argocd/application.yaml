@@ -6,7 +6,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: REPLACE_WITH_GITHUB_REPO_URL
+    repoURL: https://github.com/KhoaDang-Dinh/observablity_practice
     targetRevision: dev
     path: deploy/dev
   destination:

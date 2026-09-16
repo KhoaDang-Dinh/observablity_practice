@@ -53,9 +53,10 @@ metadata:
   name: backend
   namespace: application
 spec:
+  type: LoadBalancer
   selector:
     app: backend
   ports:
     - name: http
-      port: 8080
+      port: 80
       targetPort: http

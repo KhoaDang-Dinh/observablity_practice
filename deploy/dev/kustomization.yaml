@@ -1,4 +1,5 @@
 resources:
   - namespace.yaml
   - lgtm.yaml
+  - grafana-public.yaml
   - backend.yaml

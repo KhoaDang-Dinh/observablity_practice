@@ -2,6 +2,16 @@ name: Day 3 - Terraform, EKS, CI-CD and LGTM
 
 on:
   workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action"
+        required: true
+        default: apply
+        type: choice
+        options:
+          - apply
+          - destroy
+
   push:
     branches: [dev]
     paths:
@@ -28,12 +38,82 @@ env:
   ARGOCD_VERSION: v3.5.3
 
 jobs:
+  destroy:
+    name: Destroy Terraform Infrastructure
+    runs-on: ubuntu-latest
+    if: >-
+      github.ref == 'refs/heads/dev' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.action == 'destroy'
+
+    steps:
+      - name: Checkout Dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Validate workflow configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$TF_STATE_BUCKET" ]; then
+            echo "GitHub variable TF_STATE_BUCKET is missing."
+            exit 1
+          fi
+          echo "Using state: s3://${TF_STATE_BUCKET}/${TF_STATE_KEY}"
+
+      - name: Configure Terraform AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: terraform-destroy-${{ github.run_id }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${TF_STATE_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Terraform Destroy Plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan \
+            -destroy \
+            -input=false \
+            -lock-timeout=5m \
+            -out=destroy.tfplan
+
+      - name: Terraform Destroy
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform apply \
+            -input=false \
+            -lock-timeout=5m \
+            -auto-approve \
+            destroy.tfplan
+
   infrastructure:
     name: Terraform Infrastructure
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/dev'
+    if: >-
+      github.ref == 'refs/heads/dev' &&
+      (github.event_name == 'push' || github.event.inputs.action == 'apply')
     outputs:
       cluster_name: ${{ steps.tf-output.outputs.cluster_name }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4

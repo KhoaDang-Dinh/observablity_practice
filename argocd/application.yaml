@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: day3-observability-demo
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: REPLACE_WITH_GITHUB_REPO_URL
+    targetRevision: dev
+    path: deploy/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: application
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

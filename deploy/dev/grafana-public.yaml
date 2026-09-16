@@ -1,0 +1,14 @@
+# Optional and COSTING MONEY: apply only when you need browser access from CloudShell.
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-public
+  namespace: observability
+spec:
+  type: LoadBalancer
+  selector:
+    app: lgtm
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000

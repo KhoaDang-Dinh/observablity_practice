@@ -1,0 +1,20 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loadgen
+  namespace: application
+spec:
+  ttlSecondsAfterFinished: 120
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: loadgen
+          image: curlimages/curl:8.16.0
+          command: ["sh", "-c"]
+          args:
+            - |
+              for i in $(seq 1 200); do
+                curl -s -o /dev/null http://backend:8080/work || true
+                sleep 0.1
+              done

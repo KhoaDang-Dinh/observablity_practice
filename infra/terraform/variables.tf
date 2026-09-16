@@ -49,17 +49,6 @@ variable "node_disk_size_gib" {
   default     = 20
 }
 
-variable "github_repository" {
-  description = "GitHub repository in OWNER/REPO format. Used to restrict the GitHub OIDC trust policy."
-  type        = string
-}
-
-variable "github_branch" {
-  description = "Branch allowed to assume the GitHub Actions ECR role."
-  type        = string
-  default     = "dev"
-}
-
 variable "ecr_repository_name" {
   type    = string
   default = "day3-backend"

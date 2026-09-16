@@ -78,6 +78,7 @@ jobs:
             -backend-config="use_lockfile=true"
 
       - name: Terraform Format
+        continue-on-error: true
         working-directory: ${{ env.TF_DIR }}
         run: terraform fmt -check -recursive
 

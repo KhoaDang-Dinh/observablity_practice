@@ -1,76 +1,14 @@
+data "aws_s3_bucket" "telemetry" {
+  bucket = var.telemetry_bucket_name
+}
+
 locals {
-  telemetry_buckets = {
-    loki      = "${var.cluster_name}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-loki"
-    tempo     = "${var.cluster_name}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-tempo"
-    mimir     = "${var.cluster_name}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-mimir"
-    pyroscope = "${var.cluster_name}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-pyroscope"
+  telemetry_prefixes = {
+    loki      = "telemetry/loki"
+    tempo     = "telemetry/tempo"
+    mimir     = "telemetry/mimir"
+    pyroscope = "telemetry/pyroscope"
   }
-}
-
-resource "aws_s3_bucket" "telemetry" {
-  for_each = local.telemetry_buckets
-
-  bucket        = each.value
-  force_destroy = true
-
-  tags = merge(local.tags, {
-    TelemetryBackend = each.key
-  })
-}
-
-resource "aws_s3_bucket_public_access_block" "telemetry" {
-  for_each = aws_s3_bucket.telemetry
-
-  bucket                  = each.value.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "telemetry" {
-  for_each = aws_s3_bucket.telemetry
-
-  bucket = each.value.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket_versioning" "telemetry" {
-  for_each = aws_s3_bucket.telemetry
-
-  bucket = each.value.id
-
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "telemetry" {
-  for_each = aws_s3_bucket.telemetry
-
-  bucket = each.value.id
-
-  rule {
-    id     = "expire-lab-telemetry"
-    status = "Enabled"
-
-    filter {}
-
-    expiration {
-      days = var.telemetry_retention_days
-    }
-
-    noncurrent_version_expiration {
-      noncurrent_days = var.telemetry_retention_days
-    }
-  }
-
-  depends_on = [aws_s3_bucket_versioning.telemetry]
 }
 
 resource "aws_iam_role" "telemetry_s3" {
@@ -103,13 +41,24 @@ resource "aws_iam_role_policy" "telemetry_s3" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "ListTelemetryBuckets"
+        Sid      = "GetTelemetryBucketLocation"
+        Effect   = "Allow"
+        Action   = "s3:GetBucketLocation"
+        Resource = data.aws_s3_bucket.telemetry.arn
+      },
+      {
+        Sid    = "ListTelemetryPrefix"
         Effect = "Allow"
-        Action = [
-          "s3:ListBucket",
-          "s3:GetBucketLocation"
-        ]
-        Resource = [for bucket in aws_s3_bucket.telemetry : bucket.arn]
+        Action = "s3:ListBucket"
+        Resource = data.aws_s3_bucket.telemetry.arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = [
+              "telemetry",
+              "telemetry/*"
+            ]
+          }
+        }
       },
       {
         Sid    = "ReadWriteTelemetryObjects"
@@ -119,7 +68,7 @@ resource "aws_iam_role_policy" "telemetry_s3" {
           "s3:PutObject",
           "s3:DeleteObject"
         ]
-        Resource = [for bucket in aws_s3_bucket.telemetry : "${bucket.arn}/*"]
+        Resource = "${data.aws_s3_bucket.telemetry.arn}/telemetry/*"
       }
     ]
   })

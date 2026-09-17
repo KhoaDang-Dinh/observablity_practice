@@ -1,0 +1,72 @@
+name: Debug backend rollout
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - ".github/workflows/debug-backend.yaml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-1
+  CLUSTER_NAME: day3-observe
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: debug-backend-${{ github.run_id }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v5.1.0
+        with:
+          version: latest
+
+      - name: Configure EKS kubeconfig
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
+
+      - name: Backend diagnostics
+        shell: bash
+        run: |
+          set +e
+          echo '=== DEPLOYMENT ==='
+          kubectl get deployment backend -n application -o wide
+          echo
+          echo '=== REPLICASETS ==='
+          kubectl get rs -n application -l app=backend -o wide
+          echo
+          echo '=== PODS ==='
+          kubectl get pods -n application -l app=backend -o wide
+          echo
+          echo '=== SECRET EXISTS ==='
+          kubectl get secret rds-postgres -n application
+          echo
+          echo '=== DESCRIBE PODS ==='
+          for p in $(kubectl get pods -n application -l app=backend -o name); do
+            echo "----- $p -----"
+            kubectl describe -n application "$p"
+          done
+          echo
+          echo '=== CURRENT LOGS ==='
+          for p in $(kubectl get pods -n application -l app=backend -o name); do
+            echo "----- $p -----"
+            kubectl logs -n application "$p" --all-containers=true --tail=200
+          done
+          echo
+          echo '=== PREVIOUS LOGS ==='
+          for p in $(kubectl get pods -n application -l app=backend -o name); do
+            echo "----- $p -----"
+            kubectl logs -n application "$p" --all-containers=true --previous --tail=200
+          done
+          echo
+          echo '=== RECENT EVENTS ==='
+          kubectl get events -n application --sort-by=.lastTimestamp | tail -100

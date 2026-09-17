@@ -1,5 +1,13 @@
+data "external" "tf_state_bucket" {
+  program = [
+    "bash",
+    "-c",
+    "test -n \"$TF_STATE_BUCKET\" && printf '{\"bucket\":\"%s\"}\\n' \"$TF_STATE_BUCKET\""
+  ]
+}
+
 data "aws_s3_bucket" "telemetry" {
-  bucket = var.telemetry_bucket_name
+  bucket = data.external.tf_state_bucket.result.bucket
 }
 
 locals {
@@ -47,9 +55,9 @@ resource "aws_iam_role_policy" "telemetry_s3" {
         Resource = data.aws_s3_bucket.telemetry.arn
       },
       {
-        Sid    = "ListTelemetryPrefix"
-        Effect = "Allow"
-        Action = "s3:ListBucket"
+        Sid      = "ListTelemetryPrefix"
+        Effect   = "Allow"
+        Action   = "s3:ListBucket"
         Resource = data.aws_s3_bucket.telemetry.arn
         Condition = {
           StringLike = {

@@ -39,8 +39,12 @@ output "db_master_secret_arn" {
   sensitive = true
 }
 
-output "telemetry_bucket_names" {
-  value = { for name, bucket in aws_s3_bucket.telemetry : name => bucket.bucket }
+output "telemetry_bucket_name" {
+  value = data.aws_s3_bucket.telemetry.bucket
+}
+
+output "telemetry_prefixes" {
+  value = local.telemetry_prefixes
 }
 
 output "telemetry_pod_identity_role_arn" {

@@ -89,3 +89,9 @@ variable "db_username" {
   type        = string
   default     = "appadmin"
 }
+
+variable "telemetry_retention_days" {
+  description = "S3 lifecycle retention for this short-lived telemetry lab."
+  type        = number
+  default     = 7
+}

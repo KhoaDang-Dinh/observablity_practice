@@ -91,6 +91,10 @@ module "eks" {
     metrics-server = {
       most_recent = true
     }
+
+    eks-pod-identity-agent = {
+      most_recent = true
+    }
   }
 
   vpc_id     = module.vpc.vpc_id

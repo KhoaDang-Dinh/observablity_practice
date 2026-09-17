@@ -90,8 +90,7 @@ variable "db_username" {
   default     = "appadmin"
 }
 
-variable "telemetry_retention_days" {
-  description = "S3 lifecycle retention for this short-lived telemetry lab."
-  type        = number
-  default     = 7
+variable "telemetry_bucket_name" {
+  description = "Existing S3 bucket shared with Terraform state. Telemetry is restricted to the telemetry/* prefix."
+  type        = string
 }

@@ -1,5 +1,6 @@
 resources:
   - namespace.yaml
+  - telemetry-serviceaccount.yaml
   - lgtm.yaml
   - grafana-public.yaml
   - backend.yaml

@@ -21,6 +21,12 @@ locals {
     cidrsubnet(var.vpc_cidr, 8, 2),
   ]
 
+  # RDS stays private. These subnets have no NAT/IGW route created for them.
+  private_subnets = [
+    cidrsubnet(var.vpc_cidr, 8, 11),
+    cidrsubnet(var.vpc_cidr, 8, 12),
+  ]
+
   tags = {
     Project     = "day3-cicd-lgtm"
     Environment = "dev"
@@ -35,8 +41,9 @@ module "vpc" {
   name = "${var.cluster_name}-vpc"
   cidr = var.vpc_cidr
 
-  azs            = local.azs
-  public_subnets = local.public_subnets
+  azs             = local.azs
+  public_subnets  = local.public_subnets
+  private_subnets = local.private_subnets
 
   enable_nat_gateway      = false
   enable_dns_support      = true
@@ -44,8 +51,8 @@ module "vpc" {
   map_public_ip_on_launch = true
 
   public_subnet_tags = {
-    "kubernetes.io/role/elb"                      = "1"
-    "kubernetes.io/cluster/${var.cluster_name}"   = "shared"
+    "kubernetes.io/role/elb"                    = "1"
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
   }
 }
 
@@ -118,6 +125,68 @@ module "eks" {
       }
     }
   }
+}
+
+resource "aws_db_subnet_group" "postgres" {
+  name       = "${var.cluster_name}-postgres"
+  subnet_ids = module.vpc.private_subnets
+
+  tags = merge(local.tags, {
+    Name = "${var.cluster_name}-postgres"
+  })
+}
+
+resource "aws_security_group" "postgres" {
+  name        = "${var.cluster_name}-postgres"
+  description = "PostgreSQL access from EKS workers only"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    description     = "PostgreSQL from EKS nodes"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [module.eks.node_security_group_id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.tags
+}
+
+resource "aws_db_instance" "postgres" {
+  identifier = "${var.cluster_name}-postgres"
+
+  engine         = "postgres"
+  instance_class = var.db_instance_class
+
+  allocated_storage     = var.db_allocated_storage_gib
+  max_allocated_storage = var.db_max_allocated_storage_gib
+  storage_type          = "gp3"
+  storage_encrypted     = true
+
+  db_name  = var.db_name
+  username = var.db_username
+  port     = 5432
+
+  manage_master_user_password = true
+
+  db_subnet_group_name   = aws_db_subnet_group.postgres.name
+  vpc_security_group_ids = [aws_security_group.postgres.id]
+  publicly_accessible    = false
+  multi_az               = false
+
+  backup_retention_period = 0
+  skip_final_snapshot     = true
+  deletion_protection     = false
+  apply_immediately       = true
+
+  tags = local.tags
 }
 
 resource "aws_ecr_repository" "backend" {

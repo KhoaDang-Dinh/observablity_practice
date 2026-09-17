@@ -59,3 +59,33 @@ variable "enable_control_plane_logs" {
   type        = bool
   default     = false
 }
+
+variable "db_instance_class" {
+  description = "RDS PostgreSQL instance class. db.t3.large provides 8 GiB RAM."
+  type        = string
+  default     = "db.t3.large"
+}
+
+variable "db_allocated_storage_gib" {
+  description = "Initial PostgreSQL gp3 storage size."
+  type        = number
+  default     = 20
+}
+
+variable "db_max_allocated_storage_gib" {
+  description = "Maximum autoscaled PostgreSQL storage size."
+  type        = number
+  default     = 100
+}
+
+variable "db_name" {
+  description = "Application database name."
+  type        = string
+  default     = "observability"
+}
+
+variable "db_username" {
+  description = "RDS master username. Password is managed by AWS Secrets Manager."
+  type        = string
+  default     = "appadmin"
+}

@@ -16,7 +16,7 @@ spec:
       containers:
         - name: backend
           # GitHub Actions updates this line after pushing to ECR.
-          image: 590183737254.dkr.ecr.ap-southeast-1.amazonaws.com/day3-backend:e7405e289e7cb8e2f03045a1ba529e7565501326
+          image: 590183737254.dkr.ecr.ap-southeast-1.amazonaws.com/day3-backend:c24119b372a0cba928350c6e9f1761745df802ed
           env:
             - name: OTEL_SERVICE_NAME
               value: backend
@@ -25,7 +25,7 @@ spec:
             - name: PYROSCOPE_SERVER_ADDRESS
               value: http://lgtm.observability.svc.cluster.local:4040
             - name: SERVICE_VERSION
-              value: e7405e289e7cb8e2f03045a1ba529e7565501326
+              value: c24119b372a0cba928350c6e9f1761745df802ed
             - name: DB_HOST
               valueFrom:
                 secretKeyRef:

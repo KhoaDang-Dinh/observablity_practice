@@ -29,13 +29,14 @@ variable "node_instance_types" {
 }
 
 variable "node_min_size" {
-  type    = number
-  default = 1
+  description = "Keep two workers so rolling updates and observability pods have scheduling headroom."
+  type        = number
+  default     = 2
 }
 
 variable "node_desired_size" {
   type    = number
-  default = 1
+  default = 2
 }
 
 variable "node_max_size" {

@@ -23,6 +23,7 @@ from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.trace import Status, StatusCode
 
 SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "backend")
 SERVICE_VERSION = os.getenv("SERVICE_VERSION", "dev")
@@ -201,7 +202,7 @@ def initialize_database():
                 logger.info("database schema ready host=%s db=%s", DB_HOST, DB_NAME)
             except Exception as exc:
                 span.record_exception(exc)
-                span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
                 logger.exception("database schema initialization failed host=%s db=%s", DB_HOST, DB_NAME)
                 raise
             finally:
@@ -245,7 +246,7 @@ def database_round_trip(delay_seconds, request_status):
                 logger.info("db write ok event_id=%s", inserted_id)
             except Exception as exc:
                 span.record_exception(exc)
-                span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
                 logger.exception("db write failed")
                 raise
             finally:
@@ -270,7 +271,7 @@ def database_round_trip(delay_seconds, request_status):
                 logger.info("db read ok event_count=%s", event_count)
             except Exception as exc:
                 span.record_exception(exc)
-                span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
                 logger.exception("db read failed")
                 raise
             finally:

@@ -16,14 +16,14 @@ spec:
       containers:
         - name: backend
           # GitHub Actions updates this line after pushing to ECR.
-          image: 590183737254.dkr.ecr.ap-southeast-1.amazonaws.com/day3-backend:4ca8512014b0bd0ec13e5d6b71175e2e4ce7394f
+          image: 590183737254.dkr.ecr.ap-southeast-1.amazonaws.com/day3-backend:e7405e289e7cb8e2f03045a1ba529e7565501326
           env:
             - name: OTEL_SERVICE_NAME
               value: backend
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: lgtm.observability.svc.cluster.local:4317
             - name: SERVICE_VERSION
-              value: 4ca8512014b0bd0ec13e5d6b71175e2e4ce7394f
+              value: e7405e289e7cb8e2f03045a1ba529e7565501326
           ports:
             - name: http
               containerPort: 8080

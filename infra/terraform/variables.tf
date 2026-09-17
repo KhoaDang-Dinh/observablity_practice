@@ -89,8 +89,3 @@ variable "db_username" {
   type        = string
   default     = "appadmin"
 }
-
-variable "telemetry_bucket_name" {
-  description = "Existing S3 bucket shared with Terraform state. Telemetry is restricted to the telemetry/* prefix."
-  type        = string
-}

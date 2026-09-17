@@ -14,8 +14,29 @@ output "public_subnet_ids" {
   value = module.vpc.public_subnets
 }
 
+output "private_subnet_ids" {
+  value = module.vpc.private_subnets
+}
+
 output "ecr_repository_url" {
   value = aws_ecr_repository.backend.repository_url
+}
+
+output "db_endpoint" {
+  value = aws_db_instance.postgres.address
+}
+
+output "db_port" {
+  value = aws_db_instance.postgres.port
+}
+
+output "db_name" {
+  value = aws_db_instance.postgres.db_name
+}
+
+output "db_master_secret_arn" {
+  value     = try(aws_db_instance.postgres.master_user_secret[0].secret_arn, null)
+  sensitive = true
 }
 
 output "update_kubeconfig_command" {

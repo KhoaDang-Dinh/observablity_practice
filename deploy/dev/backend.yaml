@@ -22,8 +22,35 @@ spec:
               value: backend
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: lgtm.observability.svc.cluster.local:4317
+            - name: PYROSCOPE_SERVER_ADDRESS
+              value: http://lgtm.observability.svc.cluster.local:4040
             - name: SERVICE_VERSION
               value: e7405e289e7cb8e2f03045a1ba529e7565501326
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: rds-postgres
+                  key: host
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: rds-postgres
+                  key: port
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: rds-postgres
+                  key: database
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rds-postgres
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rds-postgres
+                  key: password
           ports:
             - name: http
               containerPort: 8080

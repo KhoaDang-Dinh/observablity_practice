@@ -39,6 +39,14 @@ output "db_master_secret_arn" {
   sensitive = true
 }
 
+output "telemetry_bucket_names" {
+  value = { for name, bucket in aws_s3_bucket.telemetry : name => bucket.bucket }
+}
+
+output "telemetry_pod_identity_role_arn" {
+  value = aws_iam_role.telemetry_s3.arn
+}
+
 output "update_kubeconfig_command" {
   value = "aws eks update-kubeconfig --region ${var.aws_region} --name ${module.eks.cluster_name}"
 }

@@ -114,6 +114,9 @@ jobs:
       (github.event_name == 'push' || github.event.inputs.action == 'apply')
     outputs:
       cluster_name: ${{ steps.tf-output.outputs.cluster_name }}
+      db_endpoint: ${{ steps.tf-output.outputs.db_endpoint }}
+      db_name: ${{ steps.tf-output.outputs.db_name }}
+      db_secret_arn: ${{ steps.tf-output.outputs.db_secret_arn }}
 
     steps:
       - name: Checkout
@@ -190,9 +193,19 @@ jobs:
         run: |
           set -euo pipefail
           CLUSTER_NAME="$(terraform output -raw cluster_name)"
+          DB_ENDPOINT="$(terraform output -raw db_endpoint)"
+          DB_NAME="$(terraform output -raw db_name)"
+          DB_SECRET_ARN="$(terraform output -raw db_master_secret_arn)"
           test -n "$CLUSTER_NAME"
+          test -n "$DB_ENDPOINT"
+          test -n "$DB_NAME"
+          test -n "$DB_SECRET_ARN"
           echo "cluster_name=$CLUSTER_NAME" >> "$GITHUB_OUTPUT"
+          echo "db_endpoint=$DB_ENDPOINT" >> "$GITHUB_OUTPUT"
+          echo "db_name=$DB_NAME" >> "$GITHUB_OUTPUT"
+          echo "db_secret_arn=$DB_SECRET_ARN" >> "$GITHUB_OUTPUT"
           echo "EKS cluster: $CLUSTER_NAME"
+          echo "RDS endpoint: $DB_ENDPOINT"
 
   build:
     name: Build and Publish Backend
@@ -310,6 +323,36 @@ jobs:
           kubectl create namespace application --dry-run=client -o yaml | kubectl apply -f -
           kubectl create namespace observability --dry-run=client -o yaml | kubectl apply -f -
           kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Sync RDS Secret to Kubernetes
+        shell: bash
+        env:
+          DB_ENDPOINT: ${{ needs.infrastructure.outputs.db_endpoint }}
+          DB_NAME: ${{ needs.infrastructure.outputs.db_name }}
+          DB_SECRET_ARN: ${{ needs.infrastructure.outputs.db_secret_arn }}
+        run: |
+          set -euo pipefail
+          SECRET_JSON="$(aws secretsmanager get-secret-value \
+            --secret-id "$DB_SECRET_ARN" \
+            --query SecretString \
+            --output text)"
+          DB_USER="$(jq -r '.username' <<< "$SECRET_JSON")"
+          DB_PASSWORD="$(jq -r '.password' <<< "$SECRET_JSON")"
+          test -n "$DB_USER"
+          test -n "$DB_PASSWORD"
+          echo "::add-mask::$DB_USER"
+          echo "::add-mask::$DB_PASSWORD"
+
+          kubectl create secret generic rds-postgres \
+            --namespace application \
+            --from-literal=host="$DB_ENDPOINT" \
+            --from-literal=port="5432" \
+            --from-literal=database="$DB_NAME" \
+            --from-literal=username="$DB_USER" \
+            --from-literal=password="$DB_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          echo "RDS Kubernetes secret synchronized."
 
       - name: Check Argo CD
         id: argocd-check
@@ -460,11 +503,14 @@ jobs:
             echo "Grafana: endpoint still pending"
           fi
 
+          echo "RDS:     ${{ needs.infrastructure.outputs.db_endpoint }}:5432 (private)"
+
           {
             echo "## EKS public endpoints"
             echo
             if [ -n "$APP_HOST" ]; then
               echo "- App: http://${APP_HOST}"
+              echo "- DB check: http://${APP_HOST}/db"
             else
               echo "- App: endpoint still pending"
             fi
@@ -473,6 +519,7 @@ jobs:
             else
               echo "- Grafana: endpoint still pending"
             fi
+            echo "- RDS: ${{ needs.infrastructure.outputs.db_endpoint }}:5432 (private VPC endpoint)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Resource Usage

@@ -18,6 +18,7 @@ on:
       - "app/**"
       - "infra/terraform/**"
       - "argocd/**"
+      - "deploy/**"
       - ".github/workflows/build.yaml"
 
 concurrency:
@@ -416,6 +417,63 @@ jobs:
         run: |
           kubectl get pods -n observability -o wide || true
           kubectl get svc -n observability || true
+
+      - name: Print Public Endpoints
+        shell: bash
+        run: |
+          set -u
+          APP_HOST=""
+          GRAFANA_HOST=""
+
+          for i in {1..60}; do
+            APP_HOST="$(kubectl get svc backend -n application -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+            if [ -z "$APP_HOST" ]; then
+              APP_HOST="$(kubectl get svc backend -n application -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+            fi
+
+            GRAFANA_HOST="$(kubectl get svc grafana-public -n observability -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+            if [ -z "$GRAFANA_HOST" ]; then
+              GRAFANA_HOST="$(kubectl get svc grafana-public -n observability -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+            fi
+
+            if [ -n "$APP_HOST" ] && [ -n "$GRAFANA_HOST" ]; then
+              break
+            fi
+
+            echo "Waiting for AWS load balancer endpoints... $i/60"
+            sleep 10
+          done
+
+          echo "========================================"
+          echo "PUBLIC ENDPOINTS"
+          echo "========================================"
+
+          if [ -n "$APP_HOST" ]; then
+            echo "App:     http://${APP_HOST}"
+          else
+            echo "App:     endpoint still pending"
+          fi
+
+          if [ -n "$GRAFANA_HOST" ]; then
+            echo "Grafana: http://${GRAFANA_HOST}"
+          else
+            echo "Grafana: endpoint still pending"
+          fi
+
+          {
+            echo "## EKS public endpoints"
+            echo
+            if [ -n "$APP_HOST" ]; then
+              echo "- App: http://${APP_HOST}"
+            else
+              echo "- App: endpoint still pending"
+            fi
+            if [ -n "$GRAFANA_HOST" ]; then
+              echo "- Grafana: http://${GRAFANA_HOST}"
+            else
+              echo "- Grafana: endpoint still pending"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Resource Usage
         run: |

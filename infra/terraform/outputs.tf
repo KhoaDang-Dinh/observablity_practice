@@ -47,8 +47,8 @@ output "telemetry_prefixes" {
   value = local.telemetry_prefixes
 }
 
-output "telemetry_pod_identity_role_arn" {
-  value = aws_iam_role.telemetry_s3.arn
+output "telemetry_pod_identity_role_arns" {
+  value = { for name, role in aws_iam_role.telemetry_s3 : name => role.arn }
 }
 
 output "update_kubeconfig_command" {

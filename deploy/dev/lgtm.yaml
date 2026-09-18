@@ -13,6 +13,32 @@ spec:
       labels:
         app: lgtm
     spec:
+      serviceAccountName: telemetry-backends
+
+      # Best-effort restore of the previous lab snapshot before LGTM starts.
+      # The all-in-one image is for development/testing; this is not a
+      # replacement for native S3 object storage in distributed Loki/Tempo/
+      # Mimir/Pyroscope.
+      initContainers:
+        - name: telemetry-restore
+          image: public.ecr.aws/aws-cli/aws-cli:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -u
+              echo "Restoring LGTM snapshot from s3://$S3_BUCKET/telemetry/lgtm/"
+              aws s3 sync                 "s3://$S3_BUCKET/telemetry/lgtm/"                 /data                 --only-show-errors                 --no-progress || true
+          env:
+            - name: S3_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: telemetry-storage
+                  key: bucket
+          volumeMounts:
+            - name: lgtm-data
+              mountPath: /data
+
       containers:
         - name: lgtm
           image: grafana/otel-lgtm:latest
@@ -25,6 +51,9 @@ spec:
               containerPort: 4318
             - name: pyroscope
               containerPort: 4040
+          volumeMounts:
+            - name: lgtm-data
+              mountPath: /data
           resources:
             requests:
               cpu: 250m
@@ -32,6 +61,51 @@ spec:
             limits:
               cpu: "1"
               memory: 1536Mi
+
+        # Periodically copies the all-in-one LGTM /data tree to the same S3
+        # bucket used by Terraform, but only under telemetry/lgtm/.
+        - name: telemetry-s3-sync
+          image: public.ecr.aws/aws-cli/aws-cli:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -u
+
+              sync_data() {
+                echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) syncing /data to s3://$S3_BUCKET/telemetry/lgtm/"
+                aws s3 sync                   /data                   "s3://$S3_BUCKET/telemetry/lgtm/"                   --only-show-errors                   --no-progress || true
+              }
+
+              trap 'sync_data; exit 0' TERM INT
+
+              # Give LGTM time to initialize its stores before the first upload.
+              sleep 60
+              while true; do
+                sync_data
+                sleep 300 &
+                wait $!
+              done
+          env:
+            - name: S3_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: telemetry-storage
+                  key: bucket
+          volumeMounts:
+            - name: lgtm-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+
+      volumes:
+        - name: lgtm-data
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

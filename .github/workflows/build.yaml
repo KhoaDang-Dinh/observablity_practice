@@ -88,6 +88,82 @@ jobs:
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true"
 
+      - name: Setup kubectl for cleanup
+        uses: azure/setup-kubectl@v5.1.0
+        with:
+          version: latest
+
+      - name: Discover lab resources
+        working-directory: ${{ env.TF_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLUSTER_NAME="$(terraform output -raw cluster_name 2>/dev/null || true)"
+          VPC_ID="$(terraform output -raw vpc_id 2>/dev/null || true)"
+          echo "CLUSTER_NAME=$CLUSTER_NAME" >> "$GITHUB_ENV"
+          echo "VPC_ID=$VPC_ID" >> "$GITHUB_ENV"
+          echo "Cluster: ${CLUSTER_NAME:-already deleted}"
+          echo "VPC:     ${VPC_ID:-already deleted}"
+
+      - name: Remove Kubernetes managed load balancers
+        shell: bash
+        run: |
+          set +e
+          if [ -n "${CLUSTER_NAME:-}" ] && aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+            aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
+
+            # Stop Argo CD self-healing before deleting the public Services.
+            kubectl delete application day3 -n argocd --ignore-not-found=true --wait=false || true
+
+            # These Services create AWS load balancers outside Terraform.
+            kubectl delete service backend -n application --ignore-not-found=true --wait=true || true
+            kubectl delete service grafana-public -n observability --ignore-not-found=true --wait=true || true
+          else
+            echo "EKS cluster is already absent; cleaning any orphaned AWS load balancers directly."
+          fi
+
+      - name: Remove orphaned load balancers from lab VPC
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${VPC_ID:-}" ]; then
+            echo "No VPC ID in Terraform state; skipping direct load balancer cleanup."
+            exit 0
+          fi
+
+          # The VPC is dedicated to this disposable lab, so remove any remaining
+          # ALB/NLB/CLB that would otherwise leave ENIs/public mappings behind.
+          for arn in $(aws elbv2 describe-load-balancers             --query "LoadBalancers[?VpcId=='$VPC_ID'].LoadBalancerArn"             --output text 2>/dev/null); do
+            [ -n "$arn" ] || continue
+            echo "Deleting ELBv2: $arn"
+            aws elbv2 delete-load-balancer --load-balancer-arn "$arn"
+          done
+
+          for name in $(aws elb describe-load-balancers             --query "LoadBalancerDescriptions[?VPCId=='$VPC_ID'].LoadBalancerName"             --output text 2>/dev/null); do
+            [ -n "$name" ] || continue
+            echo "Deleting Classic ELB: $name"
+            aws elb delete-load-balancer --load-balancer-name "$name"
+          done
+
+          # ELB deletion is asynchronous. Wait until the LB control-plane objects
+          # and their requester-managed ENIs/public address mappings are gone.
+          for i in {1..60}; do
+            V2_COUNT=$(aws elbv2 describe-load-balancers               --query "length(LoadBalancers[?VpcId=='$VPC_ID'])"               --output text 2>/dev/null || echo 0)
+            CLB_COUNT=$(aws elb describe-load-balancers               --query "length(LoadBalancerDescriptions[?VPCId=='$VPC_ID'])"               --output text 2>/dev/null || echo 0)
+
+            LB_ENIS=$(aws ec2 describe-network-interfaces               --filters "Name=vpc-id,Values=$VPC_ID"               --query "length(NetworkInterfaces[?contains(Description, 'ELB')])"               --output text 2>/dev/null || echo 0)
+
+            echo "Cleanup wait $i/60: elbv2=$V2_COUNT classic=$CLB_COUNT elb_enis=$LB_ENIS"
+            if [ "$V2_COUNT" = "0" ] && [ "$CLB_COUNT" = "0" ] && [ "$LB_ENIS" = "0" ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          echo "Remaining public mappings before Terraform destroy:"
+          aws ec2 describe-network-interfaces             --filters "Name=vpc-id,Values=$VPC_ID"             --query "NetworkInterfaces[?Association.PublicIp!=null].[NetworkInterfaceId,Association.PublicIp,Description,Attachment.InstanceId]"             --output table || true
+
       - name: Terraform Destroy Plan
         working-directory: ${{ env.TF_DIR }}
         run: |

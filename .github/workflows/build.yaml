@@ -37,6 +37,8 @@ env:
   TF_STATE_KEY: terraform/day3/dev/terraform.tfstate
   TERRAFORM_VERSION: 1.16.2
   ARGOCD_VERSION: v3.5.3
+  INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+  MONTHLY_COST_LIMIT_USD: ${{ vars.MONTHLY_COST_LIMIT_USD }}
 
 jobs:
   destroy:
@@ -254,6 +256,56 @@ jobs:
             -input=false \
             -lock-timeout=5m \
             -out=tfplan
+
+      - name: Export Terraform Plan JSON
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform show -json tfplan > tfplan.json
+
+      - name: Setup Infracost
+        if: env.INFRACOST_API_KEY != ''
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ env.INFRACOST_API_KEY }}
+
+      - name: Estimate monthly infrastructure cost
+        if: env.INFRACOST_API_KEY != ''
+        working-directory: ${{ env.TF_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          infracost breakdown \
+            --path tfplan.json \
+            --format json \
+            --out-file infracost.json
+
+          infracost output \
+            --path infracost.json \
+            --format table
+
+          TOTAL_MONTHLY_COST="$(jq -r '.totalMonthlyCost // "0"' infracost.json)"
+          echo "Estimated Terraform-managed monthly cost: ${TOTAL_MONTHLY_COST}"
+          {
+            echo "## Infracost"
+            echo
+            echo "- Estimated Terraform-managed monthly cost: **${TOTAL_MONTHLY_COST}**"
+            echo "- This estimate does not include every Kubernetes-created AWS resource; Cost Explorer/CUR remains the source of truth for actual spend."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "${MONTHLY_COST_LIMIT_USD:-}" ]; then
+            awk -v cost="$TOTAL_MONTHLY_COST" -v limit="$MONTHLY_COST_LIMIT_USD" 'BEGIN {
+              if ((cost + 0) > (limit + 0)) {
+                printf "Projected monthly cost %.2f exceeds configured limit %.2f\n", cost, limit
+                exit 1
+              }
+              printf "Projected monthly cost %.2f is within configured limit %.2f\n", cost, limit
+            }'
+          fi
+
+      - name: Infracost not configured
+        if: env.INFRACOST_API_KEY == ''
+        run: |
+          echo "INFRACOST_API_KEY is not configured; skipping pre-deploy cost estimate."
+          echo "Actual AWS cost reporting can still be enabled separately with AWS billing permissions."
 
       - name: Terraform Apply
         working-directory: ${{ env.TF_DIR }}

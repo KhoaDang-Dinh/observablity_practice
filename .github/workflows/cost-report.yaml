@@ -1,0 +1,79 @@
+name: FinOps - Actual AWS Cost Report
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 1 * * 1"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-1
+  PROJECT_TAG: day3-cicd-lgtm
+
+jobs:
+  actual-cost:
+    if: ${{ vars.ENABLE_AWS_COST_REPORT == 'true' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: finops-cost-${{ github.run_id }}
+
+      - name: Calculate month-to-date project cost
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          START="$(date -u +%Y-%m-01)"
+          END="$(date -u -d '+1 day' +%Y-%m-%d)"
+
+          aws ce get-cost-and-usage             --region us-east-1             --time-period "Start=$START,End=$END"             --granularity MONTHLY             --metrics UnblendedCost AmortizedCost             --filter "{
+              \"Tags\": {
+                \"Key\": \"Project\",
+                \"Values\": [\"$PROJECT_TAG\"]
+              }
+            }"             --group-by Type=DIMENSION,Key=SERVICE             > cost.json
+
+          UNBLENDED="$(jq -r '[.ResultsByTime[].Groups[].Metrics.UnblendedCost.Amount | tonumber] | add // 0' cost.json)"
+          AMORTIZED="$(jq -r '[.ResultsByTime[].Groups[].Metrics.AmortizedCost.Amount | tonumber] | add // 0' cost.json)"
+
+          echo "Month-to-date unblended cost: $$UNBLENDED"
+          echo "Month-to-date amortized cost: $$AMORTIZED"
+
+          {
+            echo "## AWS project cost — month to date"
+            echo
+            echo "- Project tag: `$PROJECT_TAG`"
+            echo "- Period: `$START` through `$END`"
+            echo "- Unblended cost: **$$UNBLENDED**"
+            echo "- Amortized cost: **$$AMORTIZED**"
+            echo
+            echo "### Cost by AWS service"
+            echo
+            echo "| Service | Unblended USD | Amortized USD |"
+            echo "|---|---:|---:|"
+            jq -r '
+              .ResultsByTime[].Groups[]
+              | [
+                  .Keys[0],
+                  (.Metrics.UnblendedCost.Amount | tonumber),
+                  (.Metrics.AmortizedCost.Amount | tonumber)
+                ]
+              | @tsv
+            ' cost.json             | sort -t$'\t' -k2,2nr             | while IFS=$'\t' read -r service unblended amortized; do
+                printf "| %s | %.4f | %.4f |\n" "$service" "$unblended" "$amortized"
+              done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cost Explorer permission hint
+        if: failure()
+        run: |
+          echo "This workflow requires ce:GetCostAndUsage on AWS_TERRAFORM_ROLE_ARN."
+          echo "It also requires Project to be activated as an AWS cost-allocation tag."

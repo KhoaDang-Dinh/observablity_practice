@@ -90,3 +90,28 @@ variable "db_username" {
   type        = string
   default     = "appadmin"
 }
+
+
+variable "enable_aws_finops" {
+  description = "Create AWS cost-allocation tag activation and the monthly project budget. Disabled by default until the Terraform role has Billing permissions."
+  type        = bool
+  default     = false
+}
+
+variable "monthly_budget_usd" {
+  description = "Monthly cost budget for the day3-cicd-lgtm project."
+  type        = number
+  default     = 400
+}
+
+variable "budget_alert_email" {
+  description = "Optional email for AWS Budget notifications. Leave empty to create the budget without email notifications."
+  type        = string
+  default     = ""
+}
+
+variable "enable_cur2_export" {
+  description = "Create a CUR 2.0 Data Export with hourly resource-level cost data in a dedicated S3 bucket."
+  type        = bool
+  default     = false
+}

@@ -11,16 +11,21 @@ data "aws_s3_bucket" "telemetry" {
 }
 
 locals {
+  # Loki/Tempo/Pyroscope support slash-delimited prefixes. Mimir's storage_prefix
+  # accepts alphanumeric characters only, so its three native stores use distinct
+  # root prefixes in the same shared bucket.
   telemetry_prefixes = {
     loki      = "telemetry/loki"
     tempo     = "telemetry/tempo"
-    mimir     = "telemetry/mimir"
+    mimir     = "telemetrymimir"
     pyroscope = "telemetry/pyroscope"
   }
 }
 
 resource "aws_iam_role" "telemetry_s3" {
-  name = "${var.cluster_name}-telemetry-s3"
+  for_each = local.telemetry_prefixes
+
+  name = "${var.cluster_name}-${each.key}-s3"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -38,53 +43,70 @@ resource "aws_iam_role" "telemetry_s3" {
     ]
   })
 
-  tags = local.tags
+  tags = merge(local.tags, {
+    Component = each.key
+  })
 }
 
 resource "aws_iam_role_policy" "telemetry_s3" {
-  name = "telemetry-s3-access"
-  role = aws_iam_role.telemetry_s3.id
+  for_each = local.telemetry_prefixes
+
+  name = "${each.key}-s3-access"
+  role = aws_iam_role.telemetry_s3[each.key].id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "GetTelemetryBucketLocation"
-        Effect   = "Allow"
-        Action   = "s3:GetBucketLocation"
+        Sid    = "BucketMetadata"
+        Effect = "Allow"
+        Action = [
+          "s3:GetBucketLocation",
+          "s3:ListBucketMultipartUploads"
+        ]
         Resource = data.aws_s3_bucket.telemetry.arn
       },
       {
-        Sid      = "ListTelemetryPrefix"
+        Sid      = "ListComponentPrefix"
         Effect   = "Allow"
         Action   = "s3:ListBucket"
         Resource = data.aws_s3_bucket.telemetry.arn
         Condition = {
           StringLike = {
-            "s3:prefix" = [
-              "telemetry",
-              "telemetry/*"
+            "s3:prefix" = each.key == "mimir" ? [
+              "telemetrymimir*"
+            ] : [
+              each.value,
+              "${each.value}/*"
             ]
           }
         }
       },
       {
-        Sid    = "ReadWriteTelemetryObjects"
+        Sid    = "ReadWriteComponentObjects"
         Effect = "Allow"
         Action = [
           "s3:GetObject",
           "s3:PutObject",
-          "s3:DeleteObject"
+          "s3:DeleteObject",
+          "s3:GetObjectTagging",
+          "s3:PutObjectTagging",
+          "s3:AbortMultipartUpload",
+          "s3:ListMultipartUploadParts"
         ]
-        Resource = "${data.aws_s3_bucket.telemetry.arn}/telemetry/*"
+        Resource = each.key == "mimir"
+          ? "${data.aws_s3_bucket.telemetry.arn}/telemetrymimir*"
+          : "${data.aws_s3_bucket.telemetry.arn}/${each.value}/*"
       }
     ]
   })
 }
 
 resource "aws_eks_pod_identity_association" "telemetry_s3" {
+  for_each = local.telemetry_prefixes
+
   cluster_name    = module.eks.cluster_name
   namespace       = "observability"
-  service_account = "telemetry-backends"
-  role_arn        = aws_iam_role.telemetry_s3.arn
+  service_account = each.key
+  role_arn        = aws_iam_role.telemetry_s3[each.key].arn
 }

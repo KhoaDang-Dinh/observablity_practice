@@ -50,10 +50,12 @@ module "vpc" {
   enable_dns_hostnames    = true
   map_public_ip_on_launch = true
 
-  public_subnet_tags = {
+  tags = local.tags
+
+  public_subnet_tags = merge(local.tags, {
     "kubernetes.io/role/elb"                    = "1"
     "kubernetes.io/cluster/${var.cluster_name}" = "shared"
-  }
+  })
 }
 
 module "eks" {
@@ -64,6 +66,7 @@ module "eks" {
   kubernetes_version = var.kubernetes_version
 
   endpoint_public_access = true
+  tags                   = local.tags
 
   # Adds the Terraform caller as an EKS access entry with cluster admin access.
   enable_cluster_creator_admin_permissions = true
@@ -127,6 +130,8 @@ module "eks" {
       labels = {
         workload = "day3-lab"
       }
+
+      tags = local.tags
     }
   }
 }
@@ -197,6 +202,7 @@ resource "aws_ecr_repository" "backend" {
   name                 = var.ecr_repository_name
   image_tag_mutability = "IMMUTABLE"
   force_delete         = true
+  tags                 = local.tags
 
   image_scanning_configuration {
     scan_on_push = true

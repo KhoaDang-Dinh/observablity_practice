@@ -94,9 +94,7 @@ resource "aws_iam_role_policy" "telemetry_s3" {
           "s3:AbortMultipartUpload",
           "s3:ListMultipartUploadParts"
         ]
-        Resource = each.key == "mimir"
-          ? "${data.aws_s3_bucket.telemetry.arn}/telemetrymimir*"
-          : "${data.aws_s3_bucket.telemetry.arn}/${each.value}/*"
+        Resource = (each.key == "mimir" ? "${data.aws_s3_bucket.telemetry.arn}/telemetrymimir*" : "${data.aws_s3_bucket.telemetry.arn}/${each.value}/*")
       }
     ]
   })

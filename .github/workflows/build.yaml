@@ -39,6 +39,10 @@ env:
   ARGOCD_VERSION: v3.5.3
   INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
   MONTHLY_COST_LIMIT_USD: ${{ vars.MONTHLY_COST_LIMIT_USD }}
+  TF_VAR_enable_aws_finops: ${{ vars.ENABLE_AWS_FINOPS || 'false' }}
+  TF_VAR_monthly_budget_usd: ${{ vars.MONTHLY_BUDGET_USD || '400' }}
+  TF_VAR_budget_alert_email: ${{ vars.BUDGET_ALERT_EMAIL || '' }}
+  TF_VAR_enable_cur2_export: ${{ vars.ENABLE_CUR2_EXPORT || 'false' }}
 
 jobs:
   destroy:

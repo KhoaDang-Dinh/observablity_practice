@@ -707,7 +707,7 @@ jobs:
               helm:
                 releaseName: opencost
                 values: |
-                  clusterName: day3-observe
+                  clusterName: cluster.local
                   podLabels:
                     cost-project: day3-cicd-lgtm
                     cost-component: opencost
@@ -862,7 +862,22 @@ jobs:
           set -euo pipefail
 
           kubectl rollout status deployment/prometheus-server -n prometheus-system --timeout=5m
-          kubectl rollout status deployment/opencost -n opencost --timeout=5m
+
+          if ! kubectl rollout status deployment/opencost -n opencost --timeout=3m; then
+            echo "=== OpenCost pods ==="
+            kubectl get pods -n opencost -o wide || true
+            echo "=== OpenCost deployment ==="
+            kubectl describe deployment/opencost -n opencost || true
+            echo "=== OpenCost pod description ==="
+            kubectl describe pod -n opencost -l app.kubernetes.io/name=opencost || true
+            echo "=== OpenCost exporter logs ==="
+            kubectl logs -n opencost -l app.kubernetes.io/name=opencost -c opencost --tail=200 || true
+            echo "=== OpenCost UI logs ==="
+            kubectl logs -n opencost -l app.kubernetes.io/name=opencost -c opencost-ui --tail=100 || true
+            echo "=== OpenCost Prometheus endpoint ==="
+            kubectl get deployment opencost -n opencost               -o jsonpath='{.spec.template.spec.containers[?(@.name=="opencost")].env[?(@.name=="PROMETHEUS_SERVER_ENDPOINT")].value}{"\n"}' || true
+            exit 1
+          fi
 
           kubectl port-forward -n opencost svc/opencost 9003:9003 >/tmp/opencost-port-forward.log 2>&1 &
           OC_PID=$!

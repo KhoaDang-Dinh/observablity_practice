@@ -4,6 +4,8 @@ kind: Service
 metadata:
   name: grafana-public
   namespace: observability
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-additional-resource-tags: "Project=day3-cicd-lgtm,Environment=dev,Component=grafana-load-balancer"
 spec:
   type: LoadBalancer
   selector:

@@ -63,16 +63,39 @@ CUR 2.0 requires BCM Data Exports and S3 permissions for the dedicated report bu
 
 ## EKS split cost allocation
 
-CUR 2.0 is configured with split-cost fields enabled. AWS account-level EKS split-cost allocation must also be opted in once in:
+This cluster uses **Resource requests** as the EKS split-cost allocation method.
+
+Configure it once in:
 
 ```text
 Billing and Cost Management
 → Cost Management preferences
 → Split cost allocation data
 → Amazon EKS
+→ Resource requests
 ```
 
-This allows shared EC2 worker cost to be allocated to Kubernetes pods/namespaces in CUR 2.0.
+AWS will allocate shared worker-node cost using container CPU, memory, and accelerator requests. This is the preferred option for this lab because it does not require Amazon Managed Service for Prometheus or CloudWatch Container Insights.
+
+All repository-owned workloads currently define CPU and memory requests:
+
+- backend application
+- OTel sidecar
+- Loki
+- Tempo
+- Mimir
+- Pyroscope
+- Grafana
+
+The pods also carry stable labels:
+
+```text
+cost-project=day3-cicd-lgtm
+cost-component=<backend|loki|tempo|mimir|pyroscope|grafana>
+environment=dev
+```
+
+CUR 2.0 is configured to include split-cost allocation data, split-line-item fields, and resource tags. This allows shared EC2 worker cost to be analyzed by cluster, namespace, workload, pod, and cost labels in Athena.
 
 Cost Explorer does not expose the EKS pod-level split data; use CUR 2.0 for that analysis.
 

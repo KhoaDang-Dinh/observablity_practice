@@ -79,7 +79,7 @@ resource "aws_bcmdataexports_export" "cur2" {
           TIME_GRANULARITY                      = "HOURLY"
           INCLUDE_RESOURCES                     = "TRUE"
           INCLUDE_MANUAL_DISCOUNT_COMPATIBILITY = "FALSE"
-          INCLUDE_SPLIT_COST_ALLOCATION_DATA    = "FALSE"
+          INCLUDE_SPLIT_COST_ALLOCATION_DATA    = "TRUE"
         }
       }
     }

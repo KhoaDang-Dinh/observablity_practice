@@ -37,7 +37,6 @@ env:
   TF_STATE_KEY: terraform/day3/dev/terraform.tfstate
   TERRAFORM_VERSION: 1.16.2
   ARGOCD_VERSION: v3.5.3
-  INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
   MONTHLY_COST_LIMIT_USD: ${{ vars.MONTHLY_COST_LIMIT_USD }}
   TF_VAR_enable_aws_finops: ${{ vars.ENABLE_AWS_FINOPS || 'false' }}
   TF_VAR_monthly_budget_usd: ${{ vars.MONTHLY_BUDGET_USD || '400' }}
@@ -265,51 +264,44 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform show -json tfplan > tfplan.json
 
-      - name: Setup Infracost
-        if: env.INFRACOST_API_KEY != ''
-        uses: infracost/actions/setup@v3
-        with:
-          api-key: ${{ env.INFRACOST_API_KEY }}
+      - name: Setup C3X
+        uses: c3xdev/setup-c3x@v1
 
-      - name: Estimate monthly infrastructure cost
-        if: env.INFRACOST_API_KEY != ''
+      - name: Estimate monthly infrastructure cost with C3X
         working-directory: ${{ env.TF_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-          infracost breakdown \
-            --path tfplan.json \
-            --format json \
-            --out-file infracost.json
 
-          infracost output \
-            --path infracost.json \
-            --format table
-
-          TOTAL_MONTHLY_COST="$(jq -r '.totalMonthlyCost // "0"' infracost.json)"
-          echo "Estimated Terraform-managed monthly cost: ${TOTAL_MONTHLY_COST}"
-          {
-            echo "## Infracost"
-            echo
-            echo "- Estimated Terraform-managed monthly cost: **${TOTAL_MONTHLY_COST}**"
-            echo "- This estimate does not include every Kubernetes-created AWS resource; Cost Explorer/CUR remains the source of truth for actual spend."
-          } >> "$GITHUB_STEP_SUMMARY"
+          C3X_ARGS=(
+            estimate
+            --path tfplan.json
+            --format json
+            --out-file c3x.json
+          )
 
           if [ -n "${MONTHLY_COST_LIMIT_USD:-}" ]; then
-            awk -v cost="$TOTAL_MONTHLY_COST" -v limit="$MONTHLY_COST_LIMIT_USD" 'BEGIN {
-              if ((cost + 0) > (limit + 0)) {
-                printf "Projected monthly cost %.2f exceeds configured limit %.2f\n", cost, limit
-                exit 1
-              }
-              printf "Projected monthly cost %.2f is within configured limit %.2f\n", cost, limit
-            }'
+            C3X_ARGS+=(--budget "$MONTHLY_COST_LIMIT_USD")
           fi
 
-      - name: Infracost not configured
-        if: env.INFRACOST_API_KEY == ''
-        run: |
-          echo "INFRACOST_API_KEY is not configured; skipping pre-deploy cost estimate."
-          echo "Actual AWS cost reporting can still be enabled separately with AWS billing permissions."
+          # Run once for a human-readable table in the job log.
+          c3x estimate --path tfplan.json
+
+          # Run machine-readable output and enforce the optional monthly budget.
+          c3x "${C3X_ARGS[@]}"
+
+          TOTAL_MONTHLY_COST="$(jq -r '.project_total // .total_monthly_cost // .totalMonthlyCost // 0' c3x.json)"
+
+          {
+            echo "## C3X pre-deploy cost estimate"
+            echo
+            echo "- Estimated Terraform-managed monthly cost: **\$${TOTAL_MONTHLY_COST}**"
+            if [ -n "${MONTHLY_COST_LIMIT_USD:-}" ]; then
+              echo "- CI monthly limit: **\$${MONTHLY_COST_LIMIT_USD}**"
+            fi
+            echo "- C3X is open source and does not require an API key."
+            echo "- Kubernetes-created AWS resources may not be fully represented; AWS Cost Explorer/CUR remains the source of truth for actual spend."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Terraform Apply
         working-directory: ${{ env.TF_DIR }}

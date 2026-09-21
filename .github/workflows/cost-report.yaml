@@ -1,4 +1,4 @@
-name: FinOps - Actual AWS Cost Report
+name: FinOps - Cluster Cost Breakdown
 
 on:
   workflow_dispatch:
@@ -12,6 +12,7 @@ permissions:
 env:
   AWS_REGION: ap-southeast-1
   PROJECT_TAG: day3-cicd-lgtm
+  MONTHLY_BUDGET_USD: ${{ vars.MONTHLY_BUDGET_USD || '400' }}
 
 jobs:
   actual-cost:
@@ -26,34 +27,59 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: finops-cost-${{ github.run_id }}
 
-      - name: Calculate month-to-date project cost
+      - name: Query AWS Cost Explorer
         shell: bash
         run: |
           set -euo pipefail
 
           START="$(date -u +%Y-%m-01)"
           END="$(date -u -d '+1 day' +%Y-%m-%d)"
+          TODAY="$(date -u +%Y-%m-%d)"
+          DAY_OF_MONTH="$(date -u +%-d)"
+          DAYS_IN_MONTH="$(date -u -d "$(date -u +%Y-%m-01) +1 month -1 day" +%-d)"
 
-          aws ce get-cost-and-usage             --region us-east-1             --time-period "Start=$START,End=$END"             --granularity MONTHLY             --metrics UnblendedCost AmortizedCost             --filter "{
-              \"Tags\": {
-                \"Key\": \"Project\",
-                \"Values\": [\"$PROJECT_TAG\"]
-              }
-            }"             --group-by Type=DIMENSION,Key=SERVICE             > cost.json
+          FILTER="$(jq -nc --arg project "$PROJECT_TAG" '{
+            Tags: {
+              Key: "Project",
+              Values: [$project],
+              MatchOptions: ["EQUALS"]
+            }
+          }')"
 
-          UNBLENDED="$(jq -r '[.ResultsByTime[].Groups[].Metrics.UnblendedCost.Amount | tonumber] | add // 0' cost.json)"
-          AMORTIZED="$(jq -r '[.ResultsByTime[].Groups[].Metrics.AmortizedCost.Amount | tonumber] | add // 0' cost.json)"
+          aws ce get-cost-and-usage             --region us-east-1             --time-period "Start=$START,End=$END"             --granularity MONTHLY             --metrics UnblendedCost AmortizedCost             --filter "$FILTER"             --group-by Type=DIMENSION,Key=SERVICE             > service-cost.json
 
-          echo "Month-to-date unblended cost: $$UNBLENDED"
-          echo "Month-to-date amortized cost: $$AMORTIZED"
+          aws ce get-cost-and-usage             --region us-east-1             --time-period "Start=$START,End=$END"             --granularity MONTHLY             --metrics UnblendedCost             --filter "$FILTER"             --group-by Type=TAG,Key=Component             > component-cost.json
+
+          aws ce get-cost-and-usage             --region us-east-1             --time-period "Start=$START,End=$END"             --granularity MONTHLY             --metrics UnblendedCost             --filter "$FILTER"             --group-by Type=DIMENSION,Key=USAGE_TYPE             > usage-cost.json
+
+          aws ce get-cost-and-usage             --region us-east-1             --time-period "Start=$START,End=$END"             --granularity DAILY             --metrics UnblendedCost             --filter "$FILTER"             > daily-cost.json
+
+          UNBLENDED="$(jq -r '[.ResultsByTime[].Groups[].Metrics.UnblendedCost.Amount | tonumber] | add // 0' service-cost.json)"
+          AMORTIZED="$(jq -r '[.ResultsByTime[].Groups[].Metrics.AmortizedCost.Amount | tonumber] | add // 0' service-cost.json)"
+
+          PROJECTED="$(awk -v spent="$UNBLENDED" -v day="$DAY_OF_MONTH" -v days="$DAYS_IN_MONTH" 'BEGIN {
+            if (day < 1) day = 1
+            printf "%.2f", (spent / day) * days
+          }')"
+
+          BUDGET_PCT="$(awk -v spent="$UNBLENDED" -v budget="$MONTHLY_BUDGET_USD" 'BEGIN {
+            if (budget <= 0) { print "0.0"; exit }
+            printf "%.1f", (spent / budget) * 100
+          }')"
 
           {
-            echo "## AWS project cost — month to date"
+            echo "## Cluster FinOps — $PROJECT_TAG"
             echo
-            echo "- Project tag: `$PROJECT_TAG`"
-            echo "- Period: `$START` through `$END`"
-            echo "- Unblended cost: **$$UNBLENDED**"
-            echo "- Amortized cost: **$$AMORTIZED**"
+            echo "| Metric | USD |"
+            echo "|---|---:|"
+            printf "| Month-to-date unblended | %.2f |\n" "$UNBLENDED"
+            printf "| Month-to-date amortized | %.2f |\n" "$AMORTIZED"
+            printf "| Simple month-end run rate | %.2f |\n" "$PROJECTED"
+            printf "| Monthly budget | %.2f |\n" "$MONTHLY_BUDGET_USD"
+            echo
+            echo "Budget consumed: **$BUDGET_PCT%**"
+            echo
+            echo "_Run-rate projection is a simple extrapolation of month-to-date spend, not an AWS forecast._"
             echo
             echo "### Cost by AWS service"
             echo
@@ -67,13 +93,82 @@ jobs:
                   (.Metrics.AmortizedCost.Amount | tonumber)
                 ]
               | @tsv
-            ' cost.json             | sort -t$'\t' -k2,2nr             | while IFS=$'\t' read -r service unblended amortized; do
+            ' service-cost.json             | sort -t$'\t' -k2,2nr             | while IFS=$'\t' read -r service unblended amortized; do
                 printf "| %s | %.4f | %.4f |\n" "$service" "$unblended" "$amortized"
               done
+
+            echo
+            echo "### Cost by cluster component"
+            echo
+            echo "| Component | Unblended USD |"
+            echo "|---|---:|"
+            jq -r '
+              .ResultsByTime[].Groups[]
+              | [
+                  (.Keys[0] | sub("^Component\\$"; "") | if . == "" then "untagged" else . end),
+                  (.Metrics.UnblendedCost.Amount | tonumber)
+                ]
+              | @tsv
+            ' component-cost.json             | sort -t$'\t' -k2,2nr             | while IFS=$'\t' read -r component cost; do
+                printf "| %s | %.4f |\n" "$component" "$cost"
+              done
+
+            echo
+            echo "### Top AWS usage types"
+            echo
+            echo "| Usage type | Unblended USD |"
+            echo "|---|---:|"
+            jq -r '
+              .ResultsByTime[].Groups[]
+              | [
+                  .Keys[0],
+                  (.Metrics.UnblendedCost.Amount | tonumber)
+                ]
+              | @tsv
+            ' usage-cost.json             | sort -t$'\t' -k2,2nr             | head -20             | while IFS=$'\t' read -r usage cost; do
+                printf "| %s | %.4f |\n" "$usage" "$cost"
+              done
+
+            echo
+            echo "### Daily burn"
+            echo
+            echo "| Day | USD |"
+            echo "|---|---:|"
+            jq -r '
+              .ResultsByTime[]
+              | [
+                  .TimePeriod.Start,
+                  (.Total.UnblendedCost.Amount | tonumber)
+                ]
+              | @tsv
+            ' daily-cost.json             | while IFS=$'\t' read -r day cost; do
+                printf "| %s | %.4f |\n" "$day" "$cost"
+              done
+
+            echo
+            echo "### Interpretation"
+            echo
+            echo "- **Service** answers which AWS product is charging you."
+            echo "- **Component** answers which part of this cluster owns the charge."
+            echo "- **Usage type** exposes drivers such as instance-hours, public IPv4, storage, and load-balancer capacity."
+            echo "- Cost allocation tags can take time to appear after activation; newly tagged resources will become more complete over subsequent reports."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce actual-spend guardrail
+        shell: bash
+        run: |
+          set -euo pipefail
+          UNBLENDED="$(jq -r '[.ResultsByTime[].Groups[].Metrics.UnblendedCost.Amount | tonumber] | add // 0' service-cost.json)"
+          awk -v spent="$UNBLENDED" -v budget="$MONTHLY_BUDGET_USD" 'BEGIN {
+            if (budget > 0 && spent > budget) {
+              printf "Month-to-date spend %.2f exceeds monthly budget %.2f\n", spent, budget
+              exit 1
+            }
+            printf "Month-to-date spend %.2f is within monthly budget %.2f\n", spent, budget
+          }'
 
       - name: Cost Explorer permission hint
         if: failure()
         run: |
-          echo "This workflow requires ce:GetCostAndUsage on AWS_TERRAFORM_ROLE_ARN."
-          echo "It also requires Project to be activated as an AWS cost-allocation tag."
+          echo "Required IAM permission: ce:GetCostAndUsage"
+          echo "Project and Component must be active AWS cost-allocation tags."

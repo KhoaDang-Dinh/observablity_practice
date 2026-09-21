@@ -58,29 +58,14 @@ resource "aws_iam_role_policy" "telemetry_s3" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "BucketMetadata"
+        Sid    = "BucketMetadataAndList"
         Effect = "Allow"
         Action = [
           "s3:GetBucketLocation",
+          "s3:ListBucket",
           "s3:ListBucketMultipartUploads"
         ]
         Resource = data.aws_s3_bucket.telemetry.arn
-      },
-      {
-        Sid      = "ListComponentPrefix"
-        Effect   = "Allow"
-        Action   = "s3:ListBucket"
-        Resource = data.aws_s3_bucket.telemetry.arn
-        Condition = {
-          StringLike = {
-            "s3:prefix" = each.key == "mimir" ? [
-              "telemetrymimir*"
-            ] : [
-              each.value,
-              "${each.value}/*"
-            ]
-          }
-        }
       },
       {
         Sid    = "ReadWriteComponentObjects"

@@ -189,6 +189,8 @@ kind: Service
 metadata:
   name: backend
   namespace: application
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-additional-resource-tags: "Project=day3-cicd-lgtm,Environment=dev,Component=app-load-balancer"
 spec:
   type: LoadBalancer
   selector:

@@ -2,7 +2,7 @@
 
 This lab uses three cost views:
 
-1. **Infracost in CI** — estimates Terraform-managed monthly cost before apply.
+1. **C3X in CI** — estimates Terraform-managed monthly cost before apply.
 2. **AWS Cost Explorer** — reports actual month-to-date project spend by service, component, usage type, and day.
 3. **CUR 2.0** — optional hourly resource-level export with EKS split cost allocation data for pod/namespace analysis.
 
@@ -38,13 +38,7 @@ MONTHLY_COST_LIMIT_USD=400
 ENABLE_CUR2_EXPORT=true
 ```
 
-Repository secret:
-
-```text
-INFRACOST_API_KEY=<Infracost API key>
-```
-
-The normal build workflow uses `MONTHLY_COST_LIMIT_USD` as a pre-deploy projected-cost gate.
+The normal build workflow uses open-source C3X and `MONTHLY_COST_LIMIT_USD` as a pre-deploy projected-cost gate. C3X requires no API key.
 The `FinOps - Cluster Cost Breakdown` workflow uses `MONTHLY_BUDGET_USD` for the actual month-to-date guardrail.
 
 ## AWS IAM permissions
@@ -108,7 +102,7 @@ The main CI workflow:
 ```text
 terraform plan
 → terraform show -json
-→ Infracost
+→ C3X
 → optional monthly projected-cost gate
 → terraform apply
 ```

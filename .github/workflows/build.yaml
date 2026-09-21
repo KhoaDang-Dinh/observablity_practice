@@ -264,8 +264,19 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform show -json tfplan > tfplan.json
 
-      - name: Setup C3X
-        uses: c3xdev/setup-c3x@v1
+      - name: Install C3X
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="0.3.4"
+          ARCHIVE="c3x_${VERSION}_linux_amd64.tar.gz"
+          URL="https://github.com/c3xdev/c3x/releases/download/v${VERSION}/${ARCHIVE}"
+
+          curl -fL "${URL}" -o /tmp/c3x.tar.gz
+          tar -xzf /tmp/c3x.tar.gz -C /tmp
+          install -m 0755 /tmp/c3x /usr/local/bin/c3x
+          c3x --version
 
       - name: Estimate monthly infrastructure cost with C3X
         working-directory: ${{ env.TF_DIR }}

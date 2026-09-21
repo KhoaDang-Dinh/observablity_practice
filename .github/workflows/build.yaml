@@ -119,6 +119,7 @@ jobs:
 
             # Stop Argo CD self-healing before deleting the public Services.
             kubectl delete application day3 -n argocd --ignore-not-found=true --wait=false || true
+            kubectl delete application loki -n argocd --ignore-not-found=true --wait=false || true
 
             # These Services create AWS load balancers outside Terraform.
             kubectl delete service backend -n application --ignore-not-found=true --wait=true || true
@@ -598,10 +599,40 @@ jobs:
                 - CreateNamespace=true
           EOF
 
+      - name: Create or Update Loki Helm Application
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: loki
+            namespace: argocd
+          spec:
+            project: default
+            source:
+              repoURL: https://github.com/${REPOSITORY}.git
+              targetRevision: dev
+              path: deploy/charts/loki
+              helm:
+                releaseName: loki
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: observability
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+          EOF
+
       - name: Show Argo CD
         run: |
           kubectl get pods -n argocd
           kubectl get application day3 -n argocd -o wide
+          kubectl get application loki -n argocd -o wide
 
   verify:
     name: Verify Deployment and Observability

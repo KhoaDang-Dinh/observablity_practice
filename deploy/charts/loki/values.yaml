@@ -49,7 +49,7 @@ config: |
   storage_config:
     use_thanos_objstore: true
     object_store:
-      storage_prefix: telemetry/loki
+      storage_prefix: telemetry-loki
       s3:
         bucket_name: ${S3_BUCKET}
         endpoint: s3.ap-southeast-1.amazonaws.com

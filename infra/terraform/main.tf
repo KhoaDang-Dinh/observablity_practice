@@ -50,9 +50,13 @@ module "vpc" {
   enable_dns_hostnames    = true
   map_public_ip_on_launch = true
 
-  tags = local.tags
+  tags = merge(local.tags, {
+    Component = "network"
+  })
 
   public_subnet_tags = merge(local.tags, {
+    Component = "network"
+
     "kubernetes.io/role/elb"                    = "1"
     "kubernetes.io/cluster/${var.cluster_name}" = "shared"
   })
@@ -66,7 +70,9 @@ module "eks" {
   kubernetes_version = var.kubernetes_version
 
   endpoint_public_access = true
-  tags                   = local.tags
+  tags = merge(local.tags, {
+    Component = "eks-control-plane"
+  })
 
   # Adds the Terraform caller as an EKS access entry with cluster admin access.
   enable_cluster_creator_admin_permissions = true
@@ -131,7 +137,9 @@ module "eks" {
         workload = "day3-lab"
       }
 
-      tags = local.tags
+      tags = merge(local.tags, {
+        Component = "eks-workers"
+      })
     }
   }
 }
@@ -141,7 +149,8 @@ resource "aws_db_subnet_group" "postgres" {
   subnet_ids = module.vpc.private_subnets
 
   tags = merge(local.tags, {
-    Name = "${var.cluster_name}-postgres"
+    Name      = "${var.cluster_name}-postgres"
+    Component = "database"
   })
 }
 
@@ -165,7 +174,9 @@ resource "aws_security_group" "postgres" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = local.tags
+  tags = merge(local.tags, {
+    Component = "database"
+  })
 }
 
 resource "aws_db_instance" "postgres" {
@@ -195,14 +206,18 @@ resource "aws_db_instance" "postgres" {
   deletion_protection     = false
   apply_immediately       = true
 
-  tags = local.tags
+  tags = merge(local.tags, {
+    Component = "database"
+  })
 }
 
 resource "aws_ecr_repository" "backend" {
   name                 = var.ecr_repository_name
   image_tag_mutability = "IMMUTABLE"
   force_delete         = true
-  tags                 = local.tags
+  tags = merge(local.tags, {
+    Component = "registry"
+  })
 
   image_scanning_configuration {
     scan_on_push = true

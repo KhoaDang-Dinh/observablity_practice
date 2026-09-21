@@ -120,6 +120,8 @@ jobs:
             # Stop Argo CD self-healing before deleting the public Services.
             kubectl delete application day3 -n argocd --ignore-not-found=true --wait=false || true
             kubectl delete application loki -n argocd --ignore-not-found=true --wait=false || true
+            kubectl delete application opencost -n argocd --ignore-not-found=true --wait=false || true
+            kubectl delete application opencost-prometheus -n argocd --ignore-not-found=true --wait=false || true
 
             # These Services create AWS load balancers outside Terraform.
             kubectl delete service backend -n application --ignore-not-found=true --wait=true || true
@@ -628,11 +630,136 @@ jobs:
                 - CreateNamespace=true
           EOF
 
+      - name: Create or Update OpenCost Prometheus Application
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: opencost-prometheus
+            namespace: argocd
+          spec:
+            project: default
+            source:
+              repoURL: https://prometheus-community.github.io/helm-charts
+              chart: prometheus
+              targetRevision: 29.31.1
+              helm:
+                releaseName: opencost-prometheus
+                values: |
+                  alertmanager:
+                    enabled: false
+                  prometheus-pushgateway:
+                    enabled: false
+                  server:
+                    fullnameOverride: prometheus-server
+                    persistentVolume:
+                      enabled: false
+                    retention: 2h
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 256Mi
+                      limits:
+                        cpu: 500m
+                        memory: 512Mi
+                    remoteWrite:
+                      - url: http://mimir.observability.svc.cluster.local:9009/api/v1/push
+                  kube-state-metrics:
+                    enabled: true
+                  prometheus-node-exporter:
+                    enabled: true
+                  extraScrapeConfigs: |
+                    - job_name: opencost
+                      honor_labels: true
+                      scrape_interval: 1m
+                      scrape_timeout: 10s
+                      metrics_path: /metrics
+                      scheme: http
+                      static_configs:
+                        - targets:
+                            - opencost.opencost.svc.cluster.local:9003
+          destination:
+            server: https://kubernetes.default.svc
+            namespace: prometheus-system
+          syncPolicy:
+            automated:
+              prune: true
+              selfHeal: true
+            syncOptions:
+              - CreateNamespace=true
+          EOF
+
+      - name: Create or Update OpenCost Application
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: opencost
+            namespace: argocd
+          spec:
+            project: default
+            source:
+              repoURL: https://opencost.github.io/opencost-helm-chart
+              chart: opencost
+              targetRevision: 2.5.31
+              helm:
+                releaseName: opencost
+                values: |
+                  clusterName: day3-observe
+                  podLabels:
+                    cost-project: day3-cicd-lgtm
+                    cost-component: opencost
+                    environment: dev
+                  opencost:
+                    mcp:
+                      enabled: false
+                    exporter:
+                      defaultClusterId: day3-observe
+                      resources:
+                        requests:
+                          cpu: 50m
+                          memory: 128Mi
+                        limits:
+                          cpu: 300m
+                          memory: 512Mi
+                    prometheus:
+                      internal:
+                        enabled: true
+                        serviceName: prometheus-server
+                        namespaceName: prometheus-system
+                        port: 80
+                        path: ""
+                        scheme: http
+                    ui:
+                      enabled: true
+                      resources:
+                        requests:
+                          cpu: 10m
+                          memory: 55Mi
+                        limits:
+                          memory: 256Mi
+                  service:
+                    type: ClusterIP
+          destination:
+            server: https://kubernetes.default.svc
+            namespace: opencost
+          syncPolicy:
+            automated:
+              prune: true
+              selfHeal: true
+            syncOptions:
+              - CreateNamespace=true
+          EOF
+
       - name: Show Argo CD
         run: |
           kubectl get pods -n argocd
           kubectl get application day3 -n argocd -o wide
           kubectl get application loki -n argocd -o wide
+          kubectl get application opencost-prometheus -n argocd -o wide
+          kubectl get application opencost -n argocd -o wide
 
   verify:
     name: Verify Deployment and Observability
@@ -685,6 +812,75 @@ jobs:
         run: |
           kubectl get pods -n observability -o wide || true
           kubectl get svc -n observability || true
+
+      - name: Verify Loki Helm rollout
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl rollout status deployment/loki -n observability --timeout=5m
+
+          CHECKSUM="$(kubectl get deployment loki -n observability -o jsonpath='{.spec.template.metadata.annotations.checksum/config}')"
+          test -n "$CHECKSUM"
+
+          kubectl get configmap loki-config -n observability             -o jsonpath='{.data.loki\.yaml}' | grep -q 'volume_enabled: true'
+
+          kubectl port-forward -n observability svc/loki 3100:3100 >/tmp/loki-port-forward.log 2>&1 &
+          PF_PID=$!
+          trap 'kill "$PF_PID" >/dev/null 2>&1 || true' EXIT
+
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:3100/ready >/dev/null; then
+              echo "Loki is ready with Helm config checksum $CHECKSUM"
+              kill "$PF_PID" >/dev/null 2>&1 || true
+              trap - EXIT
+              exit 0
+            fi
+            sleep 2
+          done
+
+          cat /tmp/loki-port-forward.log || true
+          exit 1
+
+      - name: Verify OpenCost and Prometheus
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl rollout status deployment/prometheus-server -n prometheus-system --timeout=5m
+          kubectl rollout status deployment/opencost -n opencost --timeout=5m
+
+          kubectl port-forward -n opencost svc/opencost 9003:9003 >/tmp/opencost-port-forward.log 2>&1 &
+          OC_PID=$!
+          trap 'kill "$OC_PID" >/dev/null 2>&1 || true' EXIT
+
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:9003/healthz >/dev/null; then
+              curl -fsS http://127.0.0.1:9003/metrics | grep -q 'node_total_hourly_cost\|kubecost'
+              echo "OpenCost API and metrics are healthy."
+              kill "$OC_PID" >/dev/null 2>&1 || true
+              trap - EXIT
+              break
+            fi
+            sleep 2
+          done
+
+          kubectl port-forward -n prometheus-system svc/prometheus-server 9090:80 >/tmp/prometheus-port-forward.log 2>&1 &
+          PROM_PID=$!
+          trap 'kill "$PROM_PID" >/dev/null 2>&1 || true' EXIT
+
+          for i in {1..30}; do
+            RESPONSE="$(curl -fsSG http://127.0.0.1:9090/api/v1/query               --data-urlencode 'query=up{job="opencost"}' 2>/dev/null || true)"
+            if echo "$RESPONSE" | jq -e '.status == "success" and (.data.result | length > 0)' >/dev/null; then
+              echo "Prometheus is scraping OpenCost."
+              kill "$PROM_PID" >/dev/null 2>&1 || true
+              trap - EXIT
+              exit 0
+            fi
+            sleep 2
+          done
+
+          cat /tmp/prometheus-port-forward.log || true
+          exit 1
 
       - name: Print Public Endpoints
         shell: bash

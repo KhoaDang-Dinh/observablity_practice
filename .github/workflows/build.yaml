@@ -510,6 +510,14 @@ jobs:
 
           echo "Grafana Kubernetes secret synchronized from $GRAFANA_SECRET_ID."
 
+          # Secret-backed environment variables are read only when the pod starts.
+          # If Grafana already exists (for example on an in-place CI update),
+          # recreate the pod so it receives the synchronized credential.
+          if kubectl get deployment grafana -n observability >/dev/null 2>&1; then
+            kubectl rollout restart deployment/grafana -n observability
+            kubectl rollout status deployment/grafana -n observability --timeout=5m
+          fi
+
       - name: Sync RDS Secret to Kubernetes
         shell: bash
         env:

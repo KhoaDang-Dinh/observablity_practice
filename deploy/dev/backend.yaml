@@ -83,6 +83,9 @@ spec:
     metadata:
       labels:
         app: backend
+        cost-component: backend
+        cost-project: day3-cicd-lgtm
+        environment: dev
     spec:
       containers:
         - name: backend

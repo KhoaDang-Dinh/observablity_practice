@@ -883,16 +883,27 @@ jobs:
           OC_PID=$!
           trap 'kill "$OC_PID" >/dev/null 2>&1 || true' EXIT
 
+          OPEN_COST_OK=false
           for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:9003/healthz >/dev/null; then
-              curl -fsS http://127.0.0.1:9003/metrics | grep -q 'node_total_hourly_cost\|kubecost'
-              echo "OpenCost API and metrics are healthy."
-              kill "$OC_PID" >/dev/null 2>&1 || true
-              trap - EXIT
-              break
+            if curl -fsS http://127.0.0.1:9003/healthz >/dev/null 2>&1; then
+              METRICS="$(curl -fsS http://127.0.0.1:9003/metrics 2>/dev/null || true)"
+              if grep -Eq 'node_total_hourly_cost|kubecost' <<< "$METRICS"; then
+                echo "OpenCost API and metrics are healthy."
+                OPEN_COST_OK=true
+                break
+              fi
             fi
             sleep 2
           done
+
+          kill "$OC_PID" >/dev/null 2>&1 || true
+          trap - EXIT
+
+          if [ "$OPEN_COST_OK" != "true" ]; then
+            echo "OpenCost did not expose expected cost metrics."
+            cat /tmp/opencost-port-forward.log || true
+            exit 1
+          fi
 
           kubectl port-forward -n prometheus-system svc/prometheus-server 9090:80 >/tmp/prometheus-port-forward.log 2>&1 &
           PROM_PID=$!

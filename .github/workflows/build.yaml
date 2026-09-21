@@ -288,7 +288,6 @@ jobs:
             estimate
             --path tfplan.json
             --format json
-            --out-file c3x.json
           )
 
           if [ -n "${MONTHLY_COST_LIMIT_USD:-}" ]; then
@@ -299,9 +298,9 @@ jobs:
           c3x estimate --path tfplan.json
 
           # Run machine-readable output and enforce the optional monthly budget.
-          c3x "${C3X_ARGS[@]}"
+          c3x "${C3X_ARGS[@]}" > c3x.json
 
-          TOTAL_MONTHLY_COST="$(jq -r '.project_total // .total_monthly_cost // .totalMonthlyCost // 0' c3x.json)"
+          TOTAL_MONTHLY_COST="$(jq -r '.project_total // 0' c3x.json)"
 
           {
             echo "## C3X pre-deploy cost estimate"

@@ -61,6 +61,9 @@ spec:
     metadata:
       labels:
         app: loki
+        cost-component: loki
+        cost-project: day3-cicd-lgtm
+        environment: dev
     spec:
       serviceAccountName: loki
       containers:
@@ -163,6 +166,9 @@ spec:
     metadata:
       labels:
         app: tempo
+        cost-component: tempo
+        cost-project: day3-cicd-lgtm
+        environment: dev
     spec:
       serviceAccountName: tempo
       containers:
@@ -280,6 +286,9 @@ spec:
     metadata:
       labels:
         app: mimir
+        cost-component: mimir
+        cost-project: day3-cicd-lgtm
+        environment: dev
     spec:
       serviceAccountName: mimir
       containers:
@@ -371,6 +380,9 @@ spec:
     metadata:
       labels:
         app: pyroscope
+        cost-component: pyroscope
+        cost-project: day3-cicd-lgtm
+        environment: dev
     spec:
       serviceAccountName: pyroscope
       containers:
@@ -479,6 +491,9 @@ spec:
     metadata:
       labels:
         app: grafana
+        cost-component: grafana
+        cost-project: day3-cicd-lgtm
+        environment: dev
     spec:
       containers:
         - name: grafana

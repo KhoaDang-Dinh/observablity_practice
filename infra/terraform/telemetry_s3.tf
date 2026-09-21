@@ -15,7 +15,7 @@ locals {
   # accepts alphanumeric characters only, so its three native stores use distinct
   # root prefixes in the same shared bucket.
   telemetry_prefixes = {
-    loki      = "telemetry/loki"
+    loki      = "telemetry-loki"
     tempo     = "telemetry/tempo"
     mimir     = "telemetrymimir"
     pyroscope = "telemetry/pyroscope"

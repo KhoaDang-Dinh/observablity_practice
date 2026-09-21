@@ -817,7 +817,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          kubectl rollout status deployment/loki -n observability --timeout=5m
+
+          if ! kubectl rollout status deployment/loki -n observability --timeout=2m; then
+            echo "=== Loki pods ==="
+            kubectl get pods -n observability -l app=loki -o wide || true
+            echo "=== Loki deployment ==="
+            kubectl describe deployment/loki -n observability || true
+            echo "=== Loki pod description ==="
+            kubectl describe pod -n observability -l app=loki || true
+            echo "=== Loki current logs ==="
+            kubectl logs -n observability -l app=loki --tail=200 || true
+            echo "=== Loki previous logs ==="
+            kubectl logs -n observability -l app=loki --previous --tail=200 || true
+            echo "=== Rendered Loki config ==="
+            kubectl get configmap loki-config -n observability -o jsonpath='{.data.loki\.yaml}' || true
+            exit 1
+          fi
 
           CHECKSUM="$(kubectl get deployment loki -n observability -o jsonpath='{.spec.template.metadata.annotations.checksum/config}')"
           test -n "$CHECKSUM"

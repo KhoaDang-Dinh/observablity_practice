@@ -71,7 +71,7 @@ resource "aws_bcmdataexports_export" "cur2" {
     description = "Hourly CUR 2.0 export for cluster FinOps analysis"
 
     data_query {
-      query_statement = "SELECT identity_line_item_id, identity_time_interval, bill_payer_account_id, line_item_usage_account_id, line_item_resource_id, line_item_product_code, line_item_usage_type, line_item_operation, line_item_unblended_cost, line_item_unblended_rate, pricing_unit FROM COST_AND_USAGE_REPORT"
+      query_statement = "SELECT identity_line_item_id, identity_time_interval, bill_payer_account_id, line_item_usage_account_id, line_item_resource_id, line_item_product_code, line_item_usage_type, line_item_operation, line_item_unblended_cost, line_item_unblended_rate, pricing_unit, tags, split_line_item_parent_resource_id, split_line_item_reserved_usage, split_line_item_actual_usage, split_line_item_split_usage, split_line_item_split_usage_ratio, split_line_item_split_cost, split_line_item_unused_cost FROM COST_AND_USAGE_REPORT"
 
       table_configurations = {
         COST_AND_USAGE_REPORT = {

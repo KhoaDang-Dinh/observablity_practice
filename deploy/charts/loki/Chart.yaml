@@ -1,0 +1,6 @@
+apiVersion: v2
+name: loki-local
+description: Local Helm chart for Loki in the day3 observability lab
+type: application
+version: 0.1.0
+appVersion: "3.7.8"

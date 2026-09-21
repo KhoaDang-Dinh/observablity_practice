@@ -17,6 +17,14 @@ resource "aws_ce_cost_allocation_tag" "environment" {
   status  = "Active"
 }
 
+resource "aws_ce_cost_allocation_tag" "component" {
+  count    = var.enable_aws_finops ? 1 : 0
+  provider = aws.billing
+
+  tag_key = "Component"
+  status  = "Active"
+}
+
 resource "aws_budgets_budget" "project_monthly" {
   count    = var.enable_aws_finops ? 1 : 0
   provider = aws.billing
@@ -46,5 +54,6 @@ resource "aws_budgets_budget" "project_monthly" {
   depends_on = [
     aws_ce_cost_allocation_tag.project,
     aws_ce_cost_allocation_tag.environment,
+    aws_ce_cost_allocation_tag.component,
   ]
 }

@@ -474,18 +474,41 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
           echo "LGTM snapshots will sync to s3://$TELEMETRY_BUCKET/telemetry/lgtm/"
 
-      - name: Ensure Grafana admin secret
+      - name: Sync Grafana admin secret from AWS Secrets Manager
         shell: bash
+        env:
+          GRAFANA_SECRET_ID: ${{ needs.infrastructure.outputs.cluster_name }}/grafana-admin
         run: |
           set -euo pipefail
-          if kubectl get secret grafana-admin -n observability >/dev/null 2>&1; then
-            echo "Grafana admin secret already exists; preserving it."
+
+          if aws secretsmanager describe-secret             --secret-id "$GRAFANA_SECRET_ID"             --region "$AWS_REGION" >/dev/null 2>&1; then
+
+            echo "Using existing Grafana credential from AWS Secrets Manager."
+            SECRET_JSON="$(aws secretsmanager get-secret-value               --secret-id "$GRAFANA_SECRET_ID"               --region "$AWS_REGION"               --query SecretString               --output text)"
           else
+            echo "Creating persistent Grafana credential in AWS Secrets Manager."
             PASSWORD="$(openssl rand -base64 32 | tr -d '\n')"
-            kubectl create secret generic grafana-admin               --namespace observability               --from-literal=admin-user=admin               --from-literal=admin-password="$PASSWORD"
             echo "::add-mask::$PASSWORD"
-            echo "Grafana admin secret created."
+
+            SECRET_JSON="$(jq -nc               --arg username "admin"               --arg password "$PASSWORD"               '{username: $username, password: $password}')"
+
+            aws secretsmanager create-secret               --name "$GRAFANA_SECRET_ID"               --description "Persistent Grafana admin credential for the day3 EKS observability lab"               --secret-string "$SECRET_JSON"               --tags                 Key=Project,Value=day3-cicd-lgtm                 Key=Environment,Value=dev                 Key=Component,Value=grafana               --region "$AWS_REGION" >/dev/null
           fi
+
+          GRAFANA_USER="$(jq -r '.username' <<< "$SECRET_JSON")"
+          GRAFANA_PASSWORD="$(jq -r '.password' <<< "$SECRET_JSON")"
+
+          test -n "$GRAFANA_USER"
+          test "$GRAFANA_USER" != "null"
+          test -n "$GRAFANA_PASSWORD"
+          test "$GRAFANA_PASSWORD" != "null"
+
+          echo "::add-mask::$GRAFANA_USER"
+          echo "::add-mask::$GRAFANA_PASSWORD"
+
+          kubectl create secret generic grafana-admin             --namespace observability             --from-literal=admin-user="$GRAFANA_USER"             --from-literal=admin-password="$GRAFANA_PASSWORD"             --dry-run=client -o yaml | kubectl apply -f -
+
+          echo "Grafana Kubernetes secret synchronized from $GRAFANA_SECRET_ID."
 
       - name: Sync RDS Secret to Kubernetes
         shell: bash

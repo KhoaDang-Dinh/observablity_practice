@@ -386,6 +386,7 @@ data:
       "annotations": {
         "list": []
       },
+      "description": "Operational Kubernetes cost view from OpenCost metrics stored in Mimir. Use AWS Cost Explorer/CUR for authoritative billing.",
       "editable": true,
       "fiscalYearStartMonth": 0,
       "graphTooltip": 1,
@@ -393,10 +394,24 @@ data:
       "links": [],
       "panels": [
         {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "id": 100,
+          "panels": [],
+          "title": "Overview",
+          "type": "row"
+        },
+        {
           "datasource": {
             "type": "prometheus",
             "uid": "mimir"
           },
+          "description": "1 means Prometheus is successfully scraping the OpenCost exporter.",
           "fieldConfig": {
             "defaults": {
               "mappings": [
@@ -430,15 +445,15 @@ data:
           },
           "gridPos": {
             "h": 5,
-            "w": 6,
+            "w": 4,
             "x": 0,
-            "y": 0
+            "y": 1
           },
           "id": 1,
           "options": {
-            "colorMode": "value",
-            "graphMode": "area",
-            "justifyMode": "auto",
+            "colorMode": "background",
+            "graphMode": "none",
+            "justifyMode": "center",
             "orientation": "auto",
             "reduceOptions": {
               "calcs": [
@@ -447,16 +462,18 @@ data:
               "fields": "",
               "values": false
             },
-            "textMode": "auto"
+            "textMode": "value_and_name",
+            "wideLayout": true
           },
           "targets": [
             {
               "expr": "max(up{job=\"opencost\"})",
+              "instant": true,
               "legendFormat": "OpenCost",
               "refId": "A"
             }
           ],
-          "title": "OpenCost Exporter",
+          "title": "OpenCost Health",
           "type": "stat"
         },
         {
@@ -464,6 +481,7 @@ data:
             "type": "prometheus",
             "uid": "mimir"
           },
+          "description": "Estimated monthly provisioned-node cost.",
           "fieldConfig": {
             "defaults": {
               "decimals": 2,
@@ -473,9 +491,9 @@ data:
           },
           "gridPos": {
             "h": 5,
-            "w": 6,
-            "x": 6,
-            "y": 0
+            "w": 5,
+            "x": 4,
+            "y": 1
           },
           "id": 2,
           "options": {
@@ -490,16 +508,18 @@ data:
               "fields": "",
               "values": false
             },
-            "textMode": "auto"
+            "textMode": "auto",
+            "wideLayout": true
           },
           "targets": [
             {
               "expr": "sum(node_total_hourly_cost) * 730",
-              "legendFormat": "Monthly nodes",
+              "instant": true,
+              "legendFormat": "Monthly Nodes",
               "refId": "A"
             }
           ],
-          "title": "Estimated Monthly Node Cost",
+          "title": "Monthly Nodes",
           "type": "stat"
         },
         {
@@ -507,6 +527,7 @@ data:
             "type": "prometheus",
             "uid": "mimir"
           },
+          "description": "Estimated CPU and RAM allocation cost for the selected namespace(s).",
           "fieldConfig": {
             "defaults": {
               "decimals": 2,
@@ -516,9 +537,9 @@ data:
           },
           "gridPos": {
             "h": 5,
-            "w": 6,
-            "x": 12,
-            "y": 0
+            "w": 5,
+            "x": 9,
+            "y": 1
           },
           "id": 3,
           "options": {
@@ -533,16 +554,18 @@ data:
               "fields": "",
               "values": false
             },
-            "textMode": "auto"
+            "textMode": "auto",
+            "wideLayout": true
           },
           "targets": [
             {
-              "expr": "sum(kubecost_cluster_management_cost) * 730",
-              "legendFormat": "EKS management",
+              "expr": "sum(container_cpu_allocation{namespace=~\"$namespace\"} * on (node) group_left node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"$namespace\"} * on (node) group_left node_ram_hourly_cost / (1024*1024*1024)) * 730",
+              "instant": true,
+              "legendFormat": "Monthly Workload CPU+RAM",
               "refId": "A"
             }
           ],
-          "title": "Monthly Cluster Management Cost",
+          "title": "Monthly Workload CPU+RAM",
           "type": "stat"
         },
         {
@@ -550,6 +573,7 @@ data:
             "type": "prometheus",
             "uid": "mimir"
           },
+          "description": "Estimated Kubernetes cluster-management fee.",
           "fieldConfig": {
             "defaults": {
               "decimals": 2,
@@ -559,9 +583,9 @@ data:
           },
           "gridPos": {
             "h": 5,
-            "w": 6,
-            "x": 18,
-            "y": 0
+            "w": 5,
+            "x": 14,
+            "y": 1
           },
           "id": 4,
           "options": {
@@ -576,16 +600,18 @@ data:
               "fields": "",
               "values": false
             },
-            "textMode": "auto"
+            "textMode": "auto",
+            "wideLayout": true
           },
           "targets": [
             {
-              "expr": "sum(kubecost_load_balancer_cost) * 730",
-              "legendFormat": "Load balancers",
+              "expr": "sum(kubecost_cluster_management_cost) * 730",
+              "instant": true,
+              "legendFormat": "Monthly EKS Fee",
               "refId": "A"
             }
           ],
-          "title": "Monthly Load Balancer Cost",
+          "title": "Monthly EKS Fee",
           "type": "stat"
         },
         {
@@ -593,43 +619,59 @@ data:
             "type": "prometheus",
             "uid": "mimir"
           },
+          "description": "Estimated LoadBalancer cost for selected namespace(s).",
           "fieldConfig": {
             "defaults": {
-              "decimals": 4,
+              "decimals": 2,
               "unit": "currencyUSD"
             },
             "overrides": []
           },
           "gridPos": {
-            "h": 8,
-            "w": 12,
-            "x": 0,
-            "y": 5
+            "h": 5,
+            "w": 5,
+            "x": 19,
+            "y": 1
           },
           "id": 5,
           "options": {
-            "legend": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
               "calcs": [
                 "lastNotNull"
               ],
-              "displayMode": "table",
-              "placement": "right",
-              "showLegend": true
+              "fields": "",
+              "values": false
             },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
+            "textMode": "auto",
+            "wideLayout": true
           },
           "targets": [
             {
-              "expr": "sum by (node) (node_total_hourly_cost)",
-              "legendFormat": "{{node}}",
+              "expr": "sum(kubecost_load_balancer_cost{namespace=~\"$namespace\"}) * 730",
+              "instant": true,
+              "legendFormat": "Monthly LB",
               "refId": "A"
             }
           ],
-          "title": "Node Cost (USD/hour)",
-          "type": "timeseries"
+          "title": "Monthly LB",
+          "type": "stat"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 6
+          },
+          "id": 110,
+          "panels": [],
+          "title": "Namespace Cost Allocation",
+          "type": "row"
         },
         {
           "datasource": {
@@ -644,35 +686,37 @@ data:
             "overrides": []
           },
           "gridPos": {
-            "h": 8,
+            "h": 9,
             "w": 12,
-            "x": 12,
-            "y": 5
+            "x": 0,
+            "y": 7
           },
           "id": 6,
           "options": {
-            "legend": {
+            "displayMode": "gradient",
+            "minVizHeight": 10,
+            "minVizWidth": 0,
+            "orientation": "horizontal",
+            "reduceOptions": {
               "calcs": [
                 "lastNotNull"
               ],
-              "displayMode": "table",
-              "placement": "right",
-              "showLegend": true
+              "fields": "",
+              "values": false
             },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
+            "showUnfilled": true,
+            "valueMode": "color"
           },
           "targets": [
             {
-              "expr": "sum by (namespace) (container_cpu_allocation * on (node) group_left node_cpu_hourly_cost + container_memory_allocation_bytes * on (node) group_left node_ram_hourly_cost / (1024 * 1024 * 1024)) * 730",
+              "expr": "sort_desc(sum by (namespace) (container_cpu_allocation{namespace=~\"$namespace\"} * on (node) group_left node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"$namespace\"} * on (node) group_left node_ram_hourly_cost / (1024*1024*1024)) * 730)",
+              "instant": true,
               "legendFormat": "{{namespace}}",
               "refId": "A"
             }
           ],
-          "title": "Estimated Monthly CPU + RAM Cost by Namespace",
-          "type": "timeseries"
+          "title": "Monthly CPU + RAM Cost by Namespace",
+          "type": "bargauge"
         },
         {
           "datasource": {
@@ -681,16 +725,16 @@ data:
           },
           "fieldConfig": {
             "defaults": {
-              "decimals": 3,
-              "unit": "cores"
+              "decimals": 2,
+              "unit": "currencyUSD"
             },
             "overrides": []
           },
           "gridPos": {
-            "h": 8,
+            "h": 9,
             "w": 12,
-            "x": 0,
-            "y": 13
+            "x": 12,
+            "y": 7
           },
           "id": 7,
           "options": {
@@ -709,7 +753,153 @@ data:
           },
           "targets": [
             {
-              "expr": "sum by (namespace) (container_cpu_allocation)",
+              "expr": "sum by (namespace) (container_cpu_allocation{namespace=~\"$namespace\"} * on (node) group_left node_cpu_hourly_cost + container_memory_allocation_bytes{namespace=~\"$namespace\"} * on (node) group_left node_ram_hourly_cost / (1024*1024*1024))",
+              "legendFormat": "{{namespace}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Namespace Cost Trend (USD/hour)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 2,
+              "unit": "currencyUSD"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 16
+          },
+          "id": 8,
+          "options": {
+            "displayMode": "gradient",
+            "minVizHeight": 10,
+            "minVizWidth": 0,
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "valueMode": "color"
+          },
+          "targets": [
+            {
+              "expr": "sort_desc(sum by (namespace) (pod_pvc_allocation{namespace=~\"$namespace\"} * on (persistentvolume) group_left pv_hourly_cost / (1024*1024*1024)) * 730)",
+              "instant": true,
+              "legendFormat": "{{namespace}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Monthly Storage Cost by Namespace",
+          "type": "bargauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 2,
+              "unit": "currencyUSD"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 16
+          },
+          "id": 9,
+          "options": {
+            "displayMode": "gradient",
+            "minVizHeight": 10,
+            "minVizWidth": 0,
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "valueMode": "color"
+          },
+          "targets": [
+            {
+              "expr": "sort_desc(sum by (namespace) (kubecost_load_balancer_cost{namespace=~\"$namespace\"}) * 730)",
+              "instant": true,
+              "legendFormat": "{{namespace}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Monthly Load Balancer Cost by Namespace",
+          "type": "bargauge"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 24
+          },
+          "id": 120,
+          "panels": [],
+          "title": "Resource Allocation",
+          "type": "row"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 2,
+              "unit": "cores"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 25
+          },
+          "id": 10,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (namespace) (container_cpu_allocation{namespace=~\"$namespace\"})",
               "legendFormat": "{{namespace}}",
               "refId": "A"
             }
@@ -733,9 +923,9 @@ data:
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 13
+            "y": 25
           },
-          "id": 8,
+          "id": 11,
           "options": {
             "legend": {
               "calcs": [
@@ -752,13 +942,322 @@ data:
           },
           "targets": [
             {
-              "expr": "sum by (namespace) (container_memory_allocation_bytes) / (1024 * 1024 * 1024)",
+              "expr": "sum by (namespace) (container_memory_allocation_bytes{namespace=~\"$namespace\"}) / (1024*1024*1024)",
               "legendFormat": "{{namespace}}",
               "refId": "A"
             }
           ],
-          "title": "Memory Allocation by Namespace (GiB)",
+          "title": "Memory Allocation by Namespace",
           "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 2,
+              "unit": "cores"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 0,
+            "y": 33
+          },
+          "id": 12,
+          "options": {
+            "displayMode": "gradient",
+            "minVizHeight": 10,
+            "minVizWidth": 0,
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "valueMode": "color"
+          },
+          "targets": [
+            {
+              "expr": "topk(10, sum by (namespace,pod) (container_cpu_allocation{namespace=~\"$namespace\"}))",
+              "instant": true,
+              "legendFormat": "{{namespace}} / {{pod}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Top Pods by CPU Allocation",
+          "type": "bargauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 2,
+              "unit": "gbytes"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 12,
+            "y": 33
+          },
+          "id": 13,
+          "options": {
+            "displayMode": "gradient",
+            "minVizHeight": 10,
+            "minVizWidth": 0,
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "valueMode": "color"
+          },
+          "targets": [
+            {
+              "expr": "topk(10, sum by (namespace,pod) (container_memory_allocation_bytes{namespace=~\"$namespace\"}) / (1024*1024*1024))",
+              "instant": true,
+              "legendFormat": "{{namespace}} / {{pod}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Top Pods by Memory Allocation",
+          "type": "bargauge"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 42
+          },
+          "id": 130,
+          "panels": [],
+          "title": "Cost Drivers",
+          "type": "row"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 2,
+              "unit": "currencyUSD"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 0,
+            "y": 43
+          },
+          "id": 14,
+          "options": {
+            "displayMode": "gradient",
+            "minVizHeight": 10,
+            "minVizWidth": 0,
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "valueMode": "color"
+          },
+          "targets": [
+            {
+              "expr": "sort_desc(sum by (node) (node_total_hourly_cost) * 730)",
+              "instant": true,
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Monthly Node Cost by Node",
+          "type": "bargauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 2,
+              "unit": "currencyUSD"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 12,
+            "y": 43
+          },
+          "id": 15,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (node) (node_total_hourly_cost)",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Node Cost Trend (USD/hour)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 2,
+              "unit": "currencyUSD"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 52
+          },
+          "id": 16,
+          "options": {
+            "displayMode": "gradient",
+            "minVizHeight": 10,
+            "minVizWidth": 0,
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "valueMode": "color"
+          },
+          "targets": [
+            {
+              "expr": "sort_desc(avg by (node) (node_cpu_hourly_cost))",
+              "instant": true,
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ],
+          "title": "CPU Price by Node",
+          "type": "bargauge"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "decimals": 2,
+              "unit": "currencyUSD"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 52
+          },
+          "id": 17,
+          "options": {
+            "displayMode": "gradient",
+            "minVizHeight": 10,
+            "minVizWidth": 0,
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showUnfilled": true,
+            "valueMode": "color"
+          },
+          "targets": [
+            {
+              "expr": "sort_desc(avg by (node) (node_ram_hourly_cost))",
+              "instant": true,
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ],
+          "title": "RAM Price by Node (USD/GiB-hour)",
+          "type": "bargauge"
+        },
+        {
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 60
+          },
+          "id": 140,
+          "panels": [],
+          "title": "FinOps Notes",
+          "type": "row"
+        },
+        {
+          "gridPos": {
+            "h": 6,
+            "w": 24,
+            "x": 0,
+            "y": 61
+          },
+          "id": 18,
+          "options": {
+            "content": "### How to read this dashboard\n\n- **OpenCost is an operational allocation estimate**, not the final AWS invoice.\n- **Monthly** values use an approximate 730-hour month.\n- **CPU/RAM allocation** is based on Kubernetes allocation/request-style metrics, not actual CPU utilization.\n- Use **AWS Cost Explorer / CUR 2.0** for authoritative account spend and reconciliation.\n- Use the **Namespace** filter above to drill into application, observability, kube-system, or other namespaces.",
+            "mode": "markdown"
+          },
+          "title": "About these numbers",
+          "type": "text"
         }
       ],
       "refresh": "1m",
@@ -766,20 +1265,61 @@ data:
       "tags": [
         "finops",
         "opencost",
-        "eks"
+        "eks",
+        "kubernetes",
+        "cost"
       ],
       "templating": {
-        "list": []
+        "list": [
+          {
+            "allValue": ".*",
+            "current": {
+              "selected": true,
+              "text": "All",
+              "value": "$__all"
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "mimir"
+            },
+            "definition": "label_values(container_cpu_allocation, namespace)",
+            "includeAll": true,
+            "label": "Namespace",
+            "multi": true,
+            "name": "namespace",
+            "options": [],
+            "query": {
+              "query": "label_values(container_cpu_allocation, namespace)",
+              "refId": "StandardVariableQuery"
+            },
+            "refresh": 1,
+            "regex": "",
+            "sort": 1,
+            "type": "query"
+          }
+        ]
       },
       "time": {
-        "from": "now-6h",
+        "from": "now-24h",
         "to": "now"
       },
+      "timepicker": {
+        "refresh_intervals": [
+          "30s",
+          "1m",
+          "5m",
+          "15m",
+          "30m",
+          "1h"
+        ]
+      },
       "timezone": "browser",
-      "title": "Kubernetes Cost / OpenCost",
+      "title": "Kubernetes FinOps / OpenCost",
       "uid": "opencost-finops",
-      "version": 1
+      "version": 2,
+      "weekStart": ""
     }
+
 ---
 apiVersion: apps/v1
 kind: Deployment

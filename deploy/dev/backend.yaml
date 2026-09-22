@@ -90,7 +90,7 @@ spec:
       containers:
         - name: backend
           # GitHub Actions updates this line after pushing to ECR.
-          image: 590183737254.dkr.ecr.ap-southeast-1.amazonaws.com/day3-backend:a3d787278fa094139e9bbc8788536c9351fe6a1d
+          image: 590183737254.dkr.ecr.ap-southeast-1.amazonaws.com/day3-backend:9d894cdeb949f96a1239a1dcb234126986640a23
           env:
             - name: OTEL_SERVICE_NAME
               value: backend
@@ -99,7 +99,7 @@ spec:
             - name: PYROSCOPE_SERVER_ADDRESS
               value: http://pyroscope.observability.svc.cluster.local:4040
             - name: SERVICE_VERSION
-              value: a3d787278fa094139e9bbc8788536c9351fe6a1d
+              value: 9d894cdeb949f96a1239a1dcb234126986640a23
             - name: DB_HOST
               valueFrom:
                 secretKeyRef:

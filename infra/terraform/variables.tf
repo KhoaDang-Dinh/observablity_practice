@@ -22,10 +22,28 @@ variable "vpc_cidr" {
   default     = "10.60.0.0/16"
 }
 
-variable "node_instance_types" {
-  description = "Allowed instance types for the managed node group. Keep this small for the lab."
-  type        = list(string)
-  default     = ["t3.medium"]
+variable "benchmark_mode" {
+  description = "Create temporary tainted candidate node groups for first-deployment/rebaseline capacity benchmarking."
+  type        = bool
+  default     = false
+}
+
+variable "selected_node_instance_type" {
+  description = "Instance type chosen by the capacity benchmark. Normal releases reuse this value from capacity.auto.tfvars.json."
+  type        = string
+  default     = "t3.medium"
+
+  validation {
+    condition = contains([
+      "t4g.medium",
+      "c7g.large",
+      "m7g.large",
+      "t3.medium",
+      "c7i.large",
+      "m7i.large",
+    ], var.selected_node_instance_type)
+    error_message = "selected_node_instance_type must be one of the benchmarked EKS node candidates."
+  }
 }
 
 variable "node_min_size" {

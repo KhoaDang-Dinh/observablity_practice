@@ -54,3 +54,11 @@ output "telemetry_pod_identity_role_arns" {
 output "update_kubeconfig_command" {
   value = "aws eks update-kubeconfig --region ${var.aws_region} --name ${module.eks.cluster_name}"
 }
+
+output "selected_node_instance_type" {
+  value = var.selected_node_instance_type
+}
+
+output "benchmark_mode" {
+  value = var.benchmark_mode
+}

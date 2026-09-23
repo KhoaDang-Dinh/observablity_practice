@@ -1,0 +1,624 @@
+name: Bootstrap - Benchmark and Right-Size EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_monthly_requests:
+        description: "Expected successful API requests per month"
+        required: true
+        default: "5000"
+      concurrency:
+        description: "Concurrent API requests during benchmark"
+        required: true
+        default: "10"
+      p95_ms:
+        description: "Maximum acceptable P95 latency in milliseconds"
+        required: true
+        default: "250"
+
+concurrency:
+  group: eks-rightsize-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  actions: write
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REPOSITORY: day3-backend
+  TF_DIR: infra/terraform
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_STATE_KEY: terraform/day3/dev/terraform.tfstate
+  TERRAFORM_VERSION: 1.16.2
+  MONTHLY_COST_LIMIT_USD: ${{ vars.MONTHLY_COST_LIMIT_USD }}
+
+jobs:
+  static-analysis:
+    name: Static gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Python syntax
+        run: python -m compileall -q app
+
+      - name: Semgrep SAST
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src --entrypoint semgrep \
+            semgrep/semgrep:latest scan --config auto --severity ERROR --error app
+
+      - name: Trivy source, dependency and IaC scan
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/work" -w /work aquasec/trivy:latest \
+            fs --scanners secret --exit-code 1 .
+          docker run --rm -v "$PWD:/work" -w /work aquasec/trivy:latest \
+            fs --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 app
+          docker run --rm -v "$PWD:/work" -w /work aquasec/trivy:latest \
+            fs --scanners misconfig --severity HIGH,CRITICAL --exit-code 0 infra/terraform
+
+  benchmark-infrastructure:
+    name: Create temporary EKS benchmark capacity
+    runs-on: ubuntu-latest
+    needs: [static-analysis]
+    outputs:
+      cluster_name: ${{ steps.outputs.outputs.cluster_name }}
+      db_endpoint: ${{ steps.outputs.outputs.db_endpoint }}
+      db_name: ${{ steps.outputs.outputs.db_name }}
+      db_secret_arn: ${{ steps.outputs.outputs.db_secret_arn }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: rightsize-bootstrap-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set -euo pipefail
+          test -n "$TF_STATE_BUCKET"
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${TF_STATE_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Create benchmark node groups
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform apply -input=false -lock-timeout=5m -auto-approve \
+            -var="benchmark_mode=true"
+
+      - name: Export benchmark infrastructure
+        id: outputs
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "cluster_name=$(terraform output -raw cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "db_endpoint=$(terraform output -raw db_endpoint)" >> "$GITHUB_OUTPUT"
+          echo "db_name=$(terraform output -raw db_name)" >> "$GITHUB_OUTPUT"
+          echo "db_secret_arn=$(terraform output -raw db_master_secret_arn)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build multi-architecture candidate
+    runs-on: ubuntu-latest
+    needs: [benchmark-infrastructure]
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: rightsize-ecr-${{ github.run_id }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push amd64 + arm64 image
+        id: image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --pull \
+            --push \
+            -t "$IMAGE" \
+            ./app
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Trivy scan both image architectures
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$HOME/.docker:/root/.docker:ro" aquasec/trivy:latest \
+            image --platform linux/amd64 --severity CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
+          docker run --rm -v "$HOME/.docker:/root/.docker:ro" aquasec/trivy:latest \
+            image --platform linux/arm64 --severity CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
+
+  benchmark:
+    name: Benchmark EKS node candidates
+    runs-on: ubuntu-latest
+    needs: [benchmark-infrastructure, build]
+    outputs:
+      passers: ${{ steps.select.outputs.passers }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: rightsize-benchmark-${{ github.run_id }}
+
+      - uses: azure/setup-kubectl@v5.1.0
+        with:
+          version: latest
+
+      - name: Configure EKS and benchmark namespace
+        env:
+          CLUSTER_NAME: ${{ needs.benchmark-infrastructure.outputs.cluster_name }}
+          DB_ENDPOINT: ${{ needs.benchmark-infrastructure.outputs.db_endpoint }}
+          DB_NAME: ${{ needs.benchmark-infrastructure.outputs.db_name }}
+          DB_SECRET_ARN: ${{ needs.benchmark-infrastructure.outputs.db_secret_arn }}
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
+          kubectl wait --for=condition=Ready node --all --timeout=15m
+          kubectl get nodes -L capacity.candidate,capacity.instance-type,kubernetes.io/arch
+
+          NS="rightsize-${GITHUB_RUN_ID}"
+          echo "BENCHMARK_NAMESPACE=$NS" >> "$GITHUB_ENV"
+          kubectl create namespace "$NS"
+
+          SECRET_JSON="$(aws secretsmanager get-secret-value --secret-id "$DB_SECRET_ARN" --query SecretString --output text)"
+          DB_USER="$(jq -r '.username' <<< "$SECRET_JSON")"
+          DB_PASSWORD="$(jq -r '.password' <<< "$SECRET_JSON")"
+          echo "::add-mask::$DB_USER"
+          echo "::add-mask::$DB_PASSWORD"
+
+          kubectl create secret generic rds-postgres -n "$NS" \
+            --from-literal=host="$DB_ENDPOINT" \
+            --from-literal=port=5432 \
+            --from-literal=database="$DB_NAME" \
+            --from-literal=username="$DB_USER" \
+            --from-literal=password="$DB_PASSWORD"
+
+      - name: Deploy one identical workload per candidate
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          CANDIDATES="t4g-medium c7g-large m7g-large t3-medium c7i-large m7i-large"
+          for C in $CANDIDATES; do
+            cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: otel-${C}
+            namespace: ${BENCHMARK_NAMESPACE}
+          data:
+            collector.yaml: |
+              receivers:
+                otlp:
+                  protocols:
+                    grpc:
+                      endpoint: 0.0.0.0:4317
+              processors:
+                batch: {}
+              exporters:
+                nop: {}
+              service:
+                pipelines:
+                  traces:
+                    receivers: [otlp]
+                    processors: [batch]
+                    exporters: [nop]
+                  metrics:
+                    receivers: [otlp]
+                    processors: [batch]
+                    exporters: [nop]
+                  logs:
+                    receivers: [otlp]
+                    processors: [batch]
+                    exporters: [nop]
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: bench-${C}
+            namespace: ${BENCHMARK_NAMESPACE}
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: bench-${C}
+            template:
+              metadata:
+                labels:
+                  app: bench-${C}
+              spec:
+                nodeSelector:
+                  capacity.candidate: ${C}
+                tolerations:
+                  - key: capacity-benchmark
+                    operator: Equal
+                    value: "true"
+                    effect: NoSchedule
+                containers:
+                  - name: backend
+                    image: ${IMAGE}
+                    env:
+                      - name: OTEL_SERVICE_NAME
+                        value: bench-${C}
+                      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                        value: 127.0.0.1:4317
+                      - name: SERVICE_VERSION
+                        value: ${GITHUB_SHA}
+                      - name: SYNTHETIC_CHAOS
+                        value: "false"
+                      - name: PYROSCOPE_ENABLED
+                        value: "false"
+                      - name: DB_HOST
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: host
+                      - name: DB_PORT
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: port
+                      - name: DB_NAME
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: database
+                      - name: DB_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: username
+                      - name: DB_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: password
+                    ports:
+                      - name: http
+                        containerPort: 8080
+                    resources:
+                      requests:
+                        cpu: 250m
+                        memory: 256Mi
+                      limits:
+                        cpu: 1500m
+                        memory: 1Gi
+                  - name: otel-sidecar
+                    image: otel/opentelemetry-collector-contrib:0.161.0
+                    args: ["--config=/etc/otelcol-contrib/collector.yaml"]
+                    resources:
+                      requests:
+                        cpu: 50m
+                        memory: 64Mi
+                      limits:
+                        cpu: 250m
+                        memory: 256Mi
+                    volumeMounts:
+                      - name: otel-config
+                        mountPath: /etc/otelcol-contrib
+                volumes:
+                  - name: otel-config
+                    configMap:
+                      name: otel-${C}
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: bench-${C}
+            namespace: ${BENCHMARK_NAMESPACE}
+          spec:
+            selector:
+              app: bench-${C}
+            ports:
+              - port: 80
+                targetPort: http
+          EOF
+          done
+
+          for C in $CANDIDATES; do
+            kubectl rollout status deployment/bench-${C} -n "$BENCHMARK_NAMESPACE" --timeout=10m
+          done
+
+      - name: Run identical 10-concurrency benchmark
+        id: select
+        env:
+          CONCURRENCY: ${{ inputs.concurrency }}
+          P95_MS: ${{ inputs.p95_ms }}
+        run: |
+          set -euo pipefail
+          mkdir -p benchmark-results
+          : > benchmark-results/results.tsv
+
+          declare -A TYPES=(
+            [t4g-medium]="t4g.medium"
+            [c7g-large]="c7g.large"
+            [m7g-large]="m7g.large"
+            [t3-medium]="t3.medium"
+            [c7i-large]="c7i.large"
+            [m7i-large]="m7i.large"
+          )
+
+          for C in t4g-medium c7g-large m7g-large t3-medium c7i-large m7i-large; do
+            echo "=== Benchmark ${C} (${TYPES[$C]}) ==="
+            kubectl port-forward -n "$BENCHMARK_NAMESPACE" svc/bench-${C} 18080:80 >/tmp/pf-${C}.log 2>&1 &
+            PF_PID=$!
+            trap 'kill "$PF_PID" >/dev/null 2>&1 || true' EXIT
+
+            for i in {1..30}; do
+              curl -fsS http://127.0.0.1:18080/health >/dev/null && break
+              sleep 2
+            done
+
+            set +e
+            docker run --rm --network host \
+              -e BASE_URL=http://127.0.0.1:18080 \
+              -e CONCURRENCY="$CONCURRENCY" \
+              -e P95_MS="$P95_MS" \
+              -e DURATION=60s \
+              -v "$PWD:/work" -w /work \
+              grafana/k6:latest \
+              run --summary-export "/work/benchmark-results/${C}.json" tests/k6/rightsizing.js
+            K6_RC=$?
+            set -e
+
+            kill "$PF_PID" >/dev/null 2>&1 || true
+            trap - EXIT
+
+            P95="$(jq -r '.metrics.http_req_duration.values["p(95)"] // 999999' "benchmark-results/${C}.json")"
+            RATE="$(jq -r '.metrics.http_reqs.values.rate // 0' "benchmark-results/${C}.json")"
+            FAIL_RATE="$(jq -r '.metrics.http_req_failed.values.rate // 1' "benchmark-results/${C}.json")"
+            PASS=false
+            if [ "$K6_RC" -eq 0 ]; then PASS=true; fi
+
+            printf "%s\t%s\t%s\t%s\t%s\n" "${TYPES[$C]}" "$P95" "$RATE" "$FAIL_RATE" "$PASS" >> benchmark-results/results.tsv
+
+            echo "Node snapshot:"
+            NODE="$(kubectl get pod -n "$BENCHMARK_NAMESPACE" -l app=bench-${C} -o jsonpath='{.items[0].spec.nodeName}')"
+            kubectl top node "$NODE" || true
+            kubectl top pod -n "$BENCHMARK_NAMESPACE" -l app=bench-${C} --containers || true
+          done
+
+          echo "instance_type  p95_ms  req_per_sec  failure_rate  pass"
+          column -t benchmark-results/results.tsv || cat benchmark-results/results.tsv
+
+          PASSERS="$(awk -F '\t' '$5=="true" {print $1}' benchmark-results/results.tsv | jq -R . | jq -cs .)"
+          if [ "$PASSERS" = "[]" ]; then
+            echo "No candidate met P95 <= ${P95_MS} ms and error rate < 1%."
+            exit 1
+          fi
+          echo "passers=$PASSERS" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## EKS right-sizing benchmark"
+            echo
+            echo "- Concurrent requests: **${CONCURRENCY}**"
+            echo "- P95 SLO: **${P95_MS} ms**"
+            echo
+            echo '```'
+            column -t benchmark-results/results.tsv || cat benchmark-results/results.tsv
+            echo '```'
+            echo
+            echo "Passing candidates: ${PASSERS}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup benchmark workloads
+        if: always()
+        run: kubectl delete namespace "$BENCHMARK_NAMESPACE" --wait=false --ignore-not-found=true
+
+  cost-select:
+    name: Cost gate and select cheapest passing node
+    runs-on: ubuntu-latest
+    needs: [benchmark-infrastructure, benchmark]
+    outputs:
+      selected_instance_type: ${{ steps.select.outputs.selected_instance_type }}
+      monthly_cost: ${{ steps.select.outputs.monthly_cost }}
+      cost_per_request: ${{ steps.select.outputs.cost_per_request }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: rightsize-cost-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${TF_STATE_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Install C3X
+        run: |
+          VERSION="0.3.4"
+          curl -fL "https://github.com/c3xdev/c3x/releases/download/v${VERSION}/c3x_${VERSION}_linux_amd64.tar.gz" -o /tmp/c3x.tar.gz
+          tar -xzf /tmp/c3x.tar.gz -C /tmp
+          install -m 0755 /tmp/c3x /usr/local/bin/c3x
+
+      - name: Compare final monthly cost of passing candidates
+        id: select
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          PASSERS: ${{ needs.benchmark.outputs.passers }}
+          EXPECTED_REQUESTS: ${{ inputs.expected_monthly_requests }}
+        run: |
+          set -euo pipefail
+          BEST_TYPE=""
+          BEST_MONTHLY=""
+          : > /tmp/cost-results.tsv
+
+          for TYPE in $(jq -r '.[]' <<< "$PASSERS"); do
+            SAFE="${TYPE//./-}"
+            terraform plan -input=false -lock=false \
+              -var="benchmark_mode=false" \
+              -var="selected_node_instance_type=${TYPE}" \
+              -out="/tmp/${SAFE}.tfplan" >/dev/null
+            terraform show -json "/tmp/${SAFE}.tfplan" > "/tmp/${SAFE}.json"
+            c3x estimate --path "/tmp/${SAFE}.json" --format json > "/tmp/${SAFE}-c3x.json"
+            MONTHLY="$(jq -r '.project_total // 0' "/tmp/${SAFE}-c3x.json")"
+            CPR="$(awk -v c="$MONTHLY" -v r="$EXPECTED_REQUESTS" 'BEGIN { if (r>0) printf "%.8f", c/r; else print "999999" }')"
+            printf "%s\t%s\t%s\n" "$TYPE" "$MONTHLY" "$CPR" >> /tmp/cost-results.tsv
+
+            if [ -z "$BEST_TYPE" ] || awk -v a="$MONTHLY" -v b="$BEST_MONTHLY" 'BEGIN { exit !(a < b) }'; then
+              BEST_TYPE="$TYPE"
+              BEST_MONTHLY="$MONTHLY"
+            fi
+          done
+
+          test -n "$BEST_TYPE"
+          BEST_CPR="$(awk -v c="$BEST_MONTHLY" -v r="$EXPECTED_REQUESTS" 'BEGIN { printf "%.8f", c/r }')"
+
+          if [ -n "${MONTHLY_COST_LIMIT_USD:-}" ] && ! awk -v c="$BEST_MONTHLY" -v l="$MONTHLY_COST_LIMIT_USD" 'BEGIN { exit !(c <= l) }'; then
+            echo "Cheapest passing EKS configuration is $BEST_MONTHLY USD/month, above limit $MONTHLY_COST_LIMIT_USD."
+            exit 1
+          fi
+
+          echo "selected_instance_type=$BEST_TYPE" >> "$GITHUB_OUTPUT"
+          echo "monthly_cost=$BEST_MONTHLY" >> "$GITHUB_OUTPUT"
+          echo "cost_per_request=$BEST_CPR" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Cost comparison after performance gate"
+            echo
+            echo "Only candidates that met the latency/error SLO were priced."
+            echo
+            echo '```'
+            echo "instance_type  monthly_usd  usd_per_expected_request"
+            column -t /tmp/cost-results.tsv || cat /tmp/cost-results.tsv
+            echo '```'
+            echo
+            echo "Selected: **${BEST_TYPE}**"
+            echo "Estimated monthly Terraform-managed cost: **\$${BEST_MONTHLY}**"
+            echo "Estimated cost per expected request at ${EXPECTED_REQUESTS}/month: **\$${BEST_CPR}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  finalize:
+    name: Replace benchmark nodes with selected EKS capacity
+    runs-on: ubuntu-latest
+    needs: [cost-select]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: rightsize-finalize-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Apply selected node type
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          SELECTED: ${{ needs.cost-select.outputs.selected_instance_type }}
+        run: |
+          set -euo pipefail
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=${TF_STATE_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+          terraform apply -input=false -lock-timeout=5m -auto-approve \
+            -var="benchmark_mode=false" \
+            -var="selected_node_instance_type=${SELECTED}"
+
+      - name: Persist selected capacity for normal releases
+        env:
+          SELECTED: ${{ needs.cost-select.outputs.selected_instance_type }}
+        run: |
+          set -euo pipefail
+          cat > infra/terraform/capacity.auto.tfvars.json <<EOF
+          {
+            "benchmark_mode": false,
+            "selected_node_instance_type": "${SELECTED}"
+          }
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin dev
+          git add infra/terraform/capacity.auto.tfvars.json
+          if git diff --cached --quiet; then
+            echo "Capacity baseline already persisted."
+          else
+            git commit -m "capacity: select ${SELECTED} from EKS benchmark [skip ci]"
+            git push origin HEAD:dev
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "## EKS capacity baseline selected"
+            echo
+            echo "- Instance: **${{ needs.cost-select.outputs.selected_instance_type }}**"
+            echo "- Estimated monthly cost: **\${{ needs.cost-select.outputs.monthly_cost }}**"
+            echo "- Estimated cost/request: **\${{ needs.cost-select.outputs.cost_per_request }}**"
+            echo
+            echo "Normal release workflow will reuse this instance type until this right-sizing workflow is run again."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Start normal deployment pipeline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build.yaml --ref dev -f action=apply

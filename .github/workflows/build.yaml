@@ -242,7 +242,11 @@ jobs:
           docker run --rm \
             -v "$PWD:/work" -w /work \
             aquasec/trivy:latest \
-            config --severity HIGH,CRITICAL --exit-code 0 infra/terraform deploy
+            fs --scanners misconfig --severity HIGH,CRITICAL --exit-code 0 infra/terraform
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            aquasec/trivy:latest \
+            fs --scanners misconfig --severity HIGH,CRITICAL --exit-code 0 deploy
 
   infrastructure:
     name: Terraform Infrastructure

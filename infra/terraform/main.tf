@@ -32,6 +32,93 @@ locals {
     Environment = "dev"
     ManagedBy   = "terraform"
   }
+
+  # One-time/rebaseline candidate set. The benchmark workflow creates one
+  # tainted node for each candidate plus one small system node, runs the same
+  # workload on every candidate, then removes these groups after selection.
+  benchmark_candidates = {
+    "t4g-medium" = {
+      instance_type = "t4g.medium"
+      ami_type       = "AL2023_ARM_64_STANDARD"
+      architecture   = "arm64"
+    }
+    "c7g-large" = {
+      instance_type = "c7g.large"
+      ami_type       = "AL2023_ARM_64_STANDARD"
+      architecture   = "arm64"
+    }
+    "m7g-large" = {
+      instance_type = "m7g.large"
+      ami_type       = "AL2023_ARM_64_STANDARD"
+      architecture   = "arm64"
+    }
+    "t3-medium" = {
+      instance_type = "t3.medium"
+      ami_type       = "AL2023_x86_64_STANDARD"
+      architecture   = "amd64"
+    }
+    "c7i-large" = {
+      instance_type = "c7i.large"
+      ami_type       = "AL2023_x86_64_STANDARD"
+      architecture   = "amd64"
+    }
+    "m7i-large" = {
+      instance_type = "m7i.large"
+      ami_type       = "AL2023_x86_64_STANDARD"
+      architecture   = "amd64"
+    }
+  }
+
+  selected_node_ami_type = contains([
+    "t4g.medium",
+    "c7g.large",
+    "m7g.large",
+  ], var.selected_node_instance_type) ? "AL2023_ARM_64_STANDARD" : "AL2023_x86_64_STANDARD"
+
+  benchmark_node_groups = {
+    for name, candidate in local.benchmark_candidates : "bench-${name}" => {
+      create         = var.benchmark_mode
+      ami_type       = candidate.ami_type
+      instance_types = [candidate.instance_type]
+      capacity_type  = "ON_DEMAND"
+      min_size       = 1
+      desired_size   = 1
+      max_size       = 1
+      subnet_ids     = module.vpc.public_subnets
+
+      block_device_mappings = {
+        xvda = {
+          device_name = "/dev/xvda"
+          ebs = {
+            volume_size           = var.node_disk_size_gib
+            volume_type           = "gp3"
+            encrypted             = true
+            delete_on_termination = true
+          }
+        }
+      }
+
+      labels = {
+        workload                   = "capacity-benchmark"
+        "capacity.candidate"       = name
+        "capacity.instance-type"   = candidate.instance_type
+        "kubernetes.io/arch-class" = candidate.architecture
+      }
+
+      taints = {
+        benchmark = {
+          key    = "capacity-benchmark"
+          value  = "true"
+          effect = "NO_SCHEDULE"
+        }
+      }
+
+      tags = merge(local.tags, {
+        Component = "eks-benchmark-worker"
+        Candidate = candidate.instance_type
+      })
+    }
+  }
 }
 
 module "vpc" {
@@ -109,39 +196,66 @@ module "eks" {
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.public_subnets
 
-  eks_managed_node_groups = {
-    lab = {
-      ami_type       = "AL2023_x86_64_STANDARD"
-      instance_types = var.node_instance_types
-      capacity_type  = "ON_DEMAND"
+  eks_managed_node_groups = merge(
+    {
+      lab = {
+        create         = !var.benchmark_mode
+        ami_type       = local.selected_node_ami_type
+        instance_types = [var.selected_node_instance_type]
+        capacity_type  = "ON_DEMAND"
 
-      min_size     = var.node_min_size
-      desired_size = var.node_desired_size
-      max_size     = var.node_max_size
+        min_size     = var.node_min_size
+        desired_size = var.node_desired_size
+        max_size     = var.node_max_size
 
-      subnet_ids = module.vpc.public_subnets
+        subnet_ids = module.vpc.public_subnets
 
-      block_device_mappings = {
-        xvda = {
-          device_name = "/dev/xvda"
-          ebs = {
-            volume_size           = var.node_disk_size_gib
-            volume_type           = "gp3"
-            encrypted             = true
-            delete_on_termination = true
+        block_device_mappings = {
+          xvda = {
+            device_name = "/dev/xvda"
+            ebs = {
+              volume_size           = var.node_disk_size_gib
+              volume_type           = "gp3"
+              encrypted             = true
+              delete_on_termination = true
+            }
           }
         }
+
+        labels = {
+          workload                  = "day3-lab"
+          "capacity.instance-type"  = var.selected_node_instance_type
+        }
+
+        tags = merge(local.tags, {
+          Component = "eks-workers"
+          Selected  = var.selected_node_instance_type
+        })
       }
 
-      labels = {
-        workload = "day3-lab"
-      }
+      # Keeps CoreDNS, metrics-server and other non-benchmark pods off the
+      # tainted candidate nodes while the one-time benchmark is running.
+      benchmark-system = {
+        create         = var.benchmark_mode
+        ami_type       = "AL2023_x86_64_STANDARD"
+        instance_types = ["t3.medium"]
+        capacity_type  = "ON_DEMAND"
+        min_size       = 1
+        desired_size   = 1
+        max_size       = 1
+        subnet_ids     = module.vpc.public_subnets
 
-      tags = merge(local.tags, {
-        Component = "eks-workers"
-      })
-    }
-  }
+        labels = {
+          workload = "benchmark-system"
+        }
+
+        tags = merge(local.tags, {
+          Component = "eks-benchmark-system"
+        })
+      }
+    },
+    local.benchmark_node_groups,
+  )
 }
 
 resource "aws_db_subnet_group" "postgres" {

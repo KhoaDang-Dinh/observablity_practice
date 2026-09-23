@@ -46,6 +46,8 @@ K8S_NAMESPACE = os.getenv("K8S_NAMESPACE", "")
 K8S_POD_NAME = os.getenv("K8S_POD_NAME", "")
 K8S_POD_UID = os.getenv("K8S_POD_UID", "")
 K8S_NODE_NAME = os.getenv("K8S_NODE_NAME", "")
+SYNTHETIC_CHAOS = os.getenv("SYNTHETIC_CHAOS", "true").lower() in {"1", "true", "yes", "on"}
+PYROSCOPE_ENABLED = os.getenv("PYROSCOPE_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 
 resource_attributes = {
     "service.name": SERVICE_NAME,
@@ -100,6 +102,8 @@ logger = logging.getLogger("backend")
 # ---- Profiles (Pyroscope) ----
 PROFILING_ENABLED = False
 try:
+    if not PYROSCOPE_ENABLED:
+        raise RuntimeError("profiling disabled by configuration")
     pyroscope.configure(
         application_name="day3.backend",
         server_address=PYROSCOPE_ENDPOINT,
@@ -305,6 +309,7 @@ def health():
         "version": SERVICE_VERSION,
         "database_configured": bool(DB_HOST),
         "profiling_enabled": PROFILING_ENABLED,
+        "synthetic_chaos": SYNTHETIC_CHAOS,
     }
 
 
@@ -339,7 +344,12 @@ def database_status():
 @app.get("/work")
 def work():
     start = time.perf_counter()
-    delay = random.choice([0.05, 0.08, 0.10, 0.15, 0.60])
+    if SYNTHETIC_CHAOS:
+        delay = random.choice([0.05, 0.08, 0.10, 0.15, 0.60])
+    else:
+        # Capacity benchmark mode: retain the real HTTP + PostgreSQL path but
+        # remove deliberate 600 ms tail latency and synthetic failures.
+        delay = random.choice([0.02, 0.04, 0.06, 0.08, 0.10])
     status = 200
 
     with profile_tag({"workload": "compute"}):
@@ -348,7 +358,7 @@ def work():
             span.set_attribute("service.version", SERVICE_VERSION)
             time.sleep(delay)
 
-            if random.random() < 0.10:
+            if SYNTHETIC_CHAOS and random.random() < 0.10:
                 status = 500
                 span.set_attribute("demo.failed", True)
 

@@ -1,6 +1,7 @@
 resources:
   - namespace.yaml
   - telemetry-serviceaccount.yaml
+  - backend-otel-rbac.yaml
   - native-observability.yaml
   - grafana-public.yaml
   - backend.yaml

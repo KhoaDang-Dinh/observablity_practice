@@ -204,3 +204,10 @@ GitHub Actions  = build/publish images
 Argo CD         = Kubernetes deployment
 LGTM/OTel       = runtime observability
 ```
+
+
+## 11. Day 4 — correlation lab
+
+Continue with [Day 4 — Correlation](docs/day4-correlation.md).
+
+The focus is no longer "is telemetry arriving?" but "can one bad request be followed across metrics, traces, logs, profiles, Kubernetes identity and PostgreSQL telemetry?"

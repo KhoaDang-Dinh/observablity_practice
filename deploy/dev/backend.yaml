@@ -18,6 +18,24 @@ data:
         check_interval: 1s
         limit_mib: 192
         spike_limit_mib: 48
+      k8sattributes:
+        auth_type: serviceAccount
+        filter:
+          namespace: application
+          node_from_env_var: K8S_NODE_NAME
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.pod.uid
+            - k8s.deployment.name
+            - k8s.node.name
+        pod_association:
+          - sources:
+              - from: resource_attribute
+                name: k8s.pod.uid
+          - sources:
+              - from: connection
       batch:
         timeout: 2s
         send_batch_size: 1024
@@ -58,15 +76,15 @@ data:
       pipelines:
         traces:
           receivers: [otlp]
-          processors: [memory_limiter, batch]
+          processors: [memory_limiter, k8sattributes, batch]
           exporters: [otlp/tempo]
         metrics:
           receivers: [otlp]
-          processors: [memory_limiter, batch]
+          processors: [memory_limiter, k8sattributes, batch]
           exporters: [prometheusremotewrite/mimir]
         logs:
           receivers: [otlp]
-          processors: [memory_limiter, batch]
+          processors: [memory_limiter, k8sattributes, batch]
           exporters: [otlphttp/loki]
 ---
 apiVersion: apps/v1
@@ -87,6 +105,7 @@ spec:
         cost-project: day3-cicd-lgtm
         environment: dev
     spec:
+      serviceAccountName: backend-otel
       containers:
         - name: backend
           # GitHub Actions updates this line after pushing to ECR.
@@ -100,6 +119,22 @@ spec:
               value: http://pyroscope.observability.svc.cluster.local:4040
             - name: SERVICE_VERSION
               value: 9d894cdeb949f96a1239a1dcb234126986640a23
+            - name: K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: K8S_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: K8S_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
             - name: DB_HOST
               valueFrom:
                 secretKeyRef:
@@ -150,6 +185,11 @@ spec:
 
         - name: otel-sidecar
           image: otel/opentelemetry-collector-contrib:0.161.0
+          env:
+            - name: K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           args:
             - --config=/etc/otelcol-contrib/collector.yaml
           ports:

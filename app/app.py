@@ -42,14 +42,28 @@ DB_NAME = os.getenv("DB_NAME", "observability")
 DB_USER = os.getenv("DB_USER", "")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
-resource = Resource.create(
-    {
-        "service.name": SERVICE_NAME,
-        "service.namespace": "day3",
-        "service.version": SERVICE_VERSION,
-        "deployment.environment.name": "dev",
-    }
-)
+K8S_NAMESPACE = os.getenv("K8S_NAMESPACE", "")
+K8S_POD_NAME = os.getenv("K8S_POD_NAME", "")
+K8S_POD_UID = os.getenv("K8S_POD_UID", "")
+K8S_NODE_NAME = os.getenv("K8S_NODE_NAME", "")
+
+resource_attributes = {
+    "service.name": SERVICE_NAME,
+    "service.namespace": "day3",
+    "service.version": SERVICE_VERSION,
+    "deployment.environment.name": "dev",
+}
+
+for key, value in {
+    "k8s.namespace.name": K8S_NAMESPACE,
+    "k8s.pod.name": K8S_POD_NAME,
+    "k8s.pod.uid": K8S_POD_UID,
+    "k8s.node.name": K8S_NODE_NAME,
+}.items():
+    if value:
+        resource_attributes[key] = value
+
+resource = Resource.create(resource_attributes)
 
 # ---- Traces ----
 tracer_provider = TracerProvider(resource=resource)
@@ -93,6 +107,9 @@ try:
             "service": SERVICE_NAME,
             "version": SERVICE_VERSION,
             "environment": "dev",
+            "namespace": K8S_NAMESPACE or "unknown",
+            "pod": K8S_POD_NAME or "unknown",
+            "node": K8S_NODE_NAME or "unknown",
         },
         cpu_enabled=True,
         mem_enabled=True,

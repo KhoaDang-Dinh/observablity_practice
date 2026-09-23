@@ -1,0 +1,28 @@
+openapi: 3.0.3
+info:
+  title: Day 3 Backend Candidate
+  version: 1.0.0
+servers:
+  - url: http://127.0.0.1:18080
+paths:
+  /health:
+    get:
+      responses:
+        '200':
+          description: Healthy
+  /db:
+    get:
+      responses:
+        '200':
+          description: Database reachable
+        '503':
+          description: Database unavailable
+  /work:
+    get:
+      responses:
+        '200':
+          description: Work completed
+        '500':
+          description: Synthetic demo failure
+        '503':
+          description: Database unavailable

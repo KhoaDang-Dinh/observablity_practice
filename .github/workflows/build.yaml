@@ -1,4 +1,4 @@
-name: Day 3 - Terraform, EKS, CI-CD and LGTM
+name: DevSecOps - Static, Dynamic, Benchmark, EKS and LGTM
 
 on:
   workflow_dispatch:
@@ -19,6 +19,7 @@ on:
       - "infra/terraform/**"
       - "argocd/**"
       - "deploy/**"
+      - "tests/**"
       - ".github/workflows/build.yaml"
 
 concurrency:
@@ -190,9 +191,63 @@ jobs:
             -auto-approve \
             destroy.tfplan
 
+  static-analysis:
+    name: Static Security and Code Analysis
+    runs-on: ubuntu-latest
+    if: >-
+      github.ref == 'refs/heads/dev' &&
+      (github.event_name == 'push' || github.event.inputs.action == 'apply')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python syntax check
+        run: python -m compileall -q app
+
+      - name: SAST - Semgrep high-confidence findings
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/src" -w /src \
+            --entrypoint semgrep \
+            semgrep/semgrep:latest \
+            scan --config auto --severity ERROR --error app
+
+      - name: Trivy secret scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            aquasec/trivy:latest \
+            fs --scanners secret --exit-code 1 .
+
+      - name: Trivy dependency vulnerability gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            aquasec/trivy:latest \
+            fs --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 app
+
+      - name: Trivy IaC and Kubernetes misconfiguration report
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Report HIGH/CRITICAL findings for the lab, but do not block yet.
+          # This repo deliberately uses public worker subnets to avoid NAT cost.
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            aquasec/trivy:latest \
+            config --severity HIGH,CRITICAL --exit-code 0 infra/terraform deploy
+
   infrastructure:
     name: Terraform Infrastructure
     runs-on: ubuntu-latest
+    needs: [static-analysis]
     if: >-
       github.ref == 'refs/heads/dev' &&
       (github.event_name == 'push' || github.event.inputs.action == 'apply')
@@ -349,9 +404,11 @@ jobs:
           echo "RDS endpoint: $DB_ENDPOINT"
 
   build:
-    name: Build and Publish Backend
+    name: Build, Scan and Publish Candidate
     runs-on: ubuntu-latest
     needs: [infrastructure]
+    outputs:
+      image: ${{ steps.candidate-image.outputs.image }}
     steps:
       - name: Checkout Dev
         uses: actions/checkout@v4
@@ -374,6 +431,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build Backend Image
+        id: candidate-image
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           TAG: ${{ github.sha }}
@@ -382,29 +440,20 @@ jobs:
           IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${TAG}"
           docker build --pull -t "$IMAGE" ./app
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy candidate image gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest \
+            image --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
 
       - name: Push Backend Image
         run: docker push "$IMAGE"
 
-      - name: Update GitOps Manifest
-        run: |
-          set -euo pipefail
-          sed -i -E "s#image: .*/day3-backend:[^ ]+#image: ${IMAGE}#" deploy/dev/backend.yaml
-          sed -i -E "s#value: (bootstrap|[0-9a-f]{40})#value: ${GITHUB_SHA}#" deploy/dev/backend.yaml
-          grep "image:" deploy/dev/backend.yaml
-
-      - name: Commit Desired State
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add deploy/dev/backend.yaml
-          if git diff --cached --quiet; then
-            echo "Desired state already current."
-            exit 0
-          fi
-          git commit -m "deploy backend ${GITHUB_SHA} [skip ci]"
-          git push origin HEAD:dev
 
   kubernetes-bootstrap:
     name: Bootstrap Kubernetes
@@ -761,10 +810,327 @@ jobs:
           kubectl get application opencost-prometheus -n argocd -o wide
           kubectl get application opencost -n argocd -o wide
 
+  dynamic-analysis:
+    name: Dynamic Security and Performance Gate
+    runs-on: ubuntu-latest
+    needs: [infrastructure, build, kubernetes-bootstrap]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Configure EKS AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: predeploy-${{ github.run_id }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v5.1.0
+        with:
+          version: latest
+
+      - name: Configure EKS kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "${{ needs.infrastructure.outputs.cluster_name }}"
+
+      - name: Deploy isolated candidate
+        shell: bash
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          DB_ENDPOINT: ${{ needs.infrastructure.outputs.db_endpoint }}
+          DB_NAME: ${{ needs.infrastructure.outputs.db_name }}
+          DB_SECRET_ARN: ${{ needs.infrastructure.outputs.db_secret_arn }}
+        run: |
+          set -euo pipefail
+          NS="predeploy-${GITHUB_RUN_ID}"
+          echo "PREDEPLOY_NAMESPACE=$NS" >> "$GITHUB_ENV"
+
+          kubectl create namespace "$NS"
+
+          SECRET_JSON="$(aws secretsmanager get-secret-value \
+            --secret-id "$DB_SECRET_ARN" \
+            --query SecretString \
+            --output text)"
+          DB_USER="$(jq -r '.username' <<< "$SECRET_JSON")"
+          DB_PASSWORD="$(jq -r '.password' <<< "$SECRET_JSON")"
+          echo "::add-mask::$DB_USER"
+          echo "::add-mask::$DB_PASSWORD"
+
+          kubectl create secret generic rds-postgres -n "$NS" \
+            --from-literal=host="$DB_ENDPOINT" \
+            --from-literal=port="5432" \
+            --from-literal=database="$DB_NAME" \
+            --from-literal=username="$DB_USER" \
+            --from-literal=password="$DB_PASSWORD"
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: candidate-otel
+            namespace: ${NS}
+          data:
+            collector.yaml: |
+              receivers:
+                otlp:
+                  protocols:
+                    grpc:
+                      endpoint: 0.0.0.0:4317
+                    http:
+                      endpoint: 0.0.0.0:4318
+              processors:
+                memory_limiter:
+                  check_interval: 1s
+                  limit_mib: 192
+                  spike_limit_mib: 48
+                batch:
+                  timeout: 2s
+              exporters:
+                otlp/tempo:
+                  endpoint: tempo.observability.svc.cluster.local:4317
+                  tls:
+                    insecure: true
+                otlphttp/loki:
+                  endpoint: http://loki.observability.svc.cluster.local:3100/otlp
+                prometheusremotewrite/mimir:
+                  endpoint: http://mimir.observability.svc.cluster.local:9009/api/v1/push
+                  resource_to_telemetry_conversion:
+                    enabled: true
+              service:
+                pipelines:
+                  traces:
+                    receivers: [otlp]
+                    processors: [memory_limiter, batch]
+                    exporters: [otlp/tempo]
+                  metrics:
+                    receivers: [otlp]
+                    processors: [memory_limiter, batch]
+                    exporters: [prometheusremotewrite/mimir]
+                  logs:
+                    receivers: [otlp]
+                    processors: [memory_limiter, batch]
+                    exporters: [otlphttp/loki]
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: backend-candidate
+            namespace: ${NS}
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: backend-candidate
+            template:
+              metadata:
+                labels:
+                  app: backend-candidate
+                  environment: predeploy
+              spec:
+                containers:
+                  - name: backend
+                    image: ${IMAGE}
+                    env:
+                      - name: OTEL_SERVICE_NAME
+                        value: backend-candidate
+                      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                        value: 127.0.0.1:4317
+                      - name: PYROSCOPE_SERVER_ADDRESS
+                        value: http://pyroscope.observability.svc.cluster.local:4040
+                      - name: SERVICE_VERSION
+                        value: ${GITHUB_SHA}
+                      - name: K8S_NAMESPACE
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.namespace
+                      - name: K8S_POD_NAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.name
+                      - name: K8S_POD_UID
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.uid
+                      - name: K8S_NODE_NAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: spec.nodeName
+                      - name: DB_HOST
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: host
+                      - name: DB_PORT
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: port
+                      - name: DB_NAME
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: database
+                      - name: DB_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: username
+                      - name: DB_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: password
+                    ports:
+                      - containerPort: 8080
+                        name: http
+                    readinessProbe:
+                      httpGet:
+                        path: /health
+                        port: http
+                      initialDelaySeconds: 3
+                      periodSeconds: 3
+                    resources:
+                      requests:
+                        cpu: 250m
+                        memory: 192Mi
+                      limits:
+                        cpu: "1"
+                        memory: 512Mi
+                  - name: otel-sidecar
+                    image: otel/opentelemetry-collector-contrib:0.161.0
+                    args:
+                      - --config=/etc/otelcol-contrib/collector.yaml
+                    resources:
+                      requests:
+                        cpu: 50m
+                        memory: 64Mi
+                      limits:
+                        cpu: 250m
+                        memory: 256Mi
+                    volumeMounts:
+                      - name: otel-config
+                        mountPath: /etc/otelcol-contrib
+                volumes:
+                  - name: otel-config
+                    configMap:
+                      name: candidate-otel
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: backend-candidate
+            namespace: ${NS}
+          spec:
+            selector:
+              app: backend-candidate
+            ports:
+              - port: 80
+                targetPort: http
+          EOF
+
+          kubectl rollout status deployment/backend-candidate -n "$NS" --timeout=5m
+
+      - name: DAST - OWASP ZAP API scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl port-forward -n "$PREDEPLOY_NAMESPACE" svc/backend-candidate 18080:80 >/tmp/predeploy-port-forward.log 2>&1 &
+          PF_PID=$!
+          trap 'kill "$PF_PID" >/dev/null 2>&1 || true' EXIT
+
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:18080/health >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:18080/health
+
+          docker run --rm --network host \
+            -v "$PWD:/zap/wrk:ro" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-api-scan.py \
+            -t /zap/wrk/tests/zap/openapi.yaml \
+            -f openapi \
+            -I
+
+      - name: Performance gate - k6
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl port-forward -n "$PREDEPLOY_NAMESPACE" svc/backend-candidate 18080:80 >/tmp/predeploy-k6-port-forward.log 2>&1 &
+          PF_PID=$!
+          trap 'kill "$PF_PID" >/dev/null 2>&1 || true' EXIT
+
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:18080/health >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+
+          docker run --rm --network host \
+            -e BASE_URL=http://127.0.0.1:18080 \
+            -v "$PWD:/work:ro" \
+            grafana/k6:latest \
+            run /work/tests/k6/predeploy.js
+
+      - name: Candidate resource snapshot
+        if: always()
+        shell: bash
+        run: |
+          kubectl top pods -n "$PREDEPLOY_NAMESPACE" --containers || true
+          kubectl get pods -n "$PREDEPLOY_NAMESPACE" -o wide || true
+          kubectl logs -n "$PREDEPLOY_NAMESPACE" deploy/backend-candidate -c backend --tail=80 || true
+
+      - name: Cleanup candidate namespace
+        if: always()
+        shell: bash
+        run: |
+          kubectl delete namespace "$PREDEPLOY_NAMESPACE" --wait=false --ignore-not-found=true
+
+  promote:
+    name: Promote Candidate to GitOps
+    runs-on: ubuntu-latest
+    needs: [build, dynamic-analysis]
+
+    steps:
+      - name: Checkout Dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Update GitOps manifest after gates pass
+        shell: bash
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          sed -i -E "s#image: .*/day3-backend:[^ ]+#image: ${IMAGE}#" deploy/dev/backend.yaml
+          sed -i -E "s#value: (bootstrap|[0-9a-f]{40})#value: ${GITHUB_SHA}#" deploy/dev/backend.yaml
+          grep "image:" deploy/dev/backend.yaml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deploy/dev/backend.yaml
+          if git diff --cached --quiet; then
+            echo "Desired state already current."
+            exit 0
+          fi
+          git commit -m "promote backend ${GITHUB_SHA} after security and performance gates [skip ci]"
+          git push origin HEAD:dev
+
   verify:
     name: Verify Deployment and Observability
     runs-on: ubuntu-latest
-    needs: [infrastructure, kubernetes-bootstrap]
+    needs: [infrastructure, kubernetes-bootstrap, promote]
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6.3.0
@@ -797,6 +1163,22 @@ jobs:
             sleep 10
           done
           echo "Backend Deployment was not created."
+          exit 1
+
+      - name: Wait for Promoted Image
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_TAG="${GITHUB_SHA}"
+          for i in {1..60}; do
+            CURRENT_IMAGE="$(kubectl get deployment backend -n application -o jsonpath='{.spec.template.spec.containers[?(@.name=="backend")].image}' 2>/dev/null || true)"
+            echo "Current image: ${CURRENT_IMAGE:-pending}"
+            if [[ "$CURRENT_IMAGE" == *":${EXPECTED_TAG}" ]]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Argo CD did not deploy promoted image ${EXPECTED_TAG}."
           exit 1
 
       - name: Wait for Backend Rollout

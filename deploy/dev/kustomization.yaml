@@ -3,5 +3,6 @@ resources:
   - telemetry-serviceaccount.yaml
   - backend-otel-rbac.yaml
   - native-observability.yaml
+  - grafana-core-dashboard.yaml
   - grafana-public.yaml
   - backend.yaml

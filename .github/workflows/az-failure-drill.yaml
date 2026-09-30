@@ -1,3 +1,4 @@
+# Manual-only disaster-recovery drill. Do not add push, pull_request, or schedule triggers.
 name: AZ Failure Drill
 
 on:

@@ -1,0 +1,948 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-core-dashboard
+  namespace: observability
+data:
+  core.json: |
+    {
+      "annotations": {
+        "list": []
+      },
+      "description": "Small, reliable dashboard for this lab. Queries only metrics explicitly scraped/remote-written by this repository. Idle application metrics fall back to zero instead of No data.",
+      "editable": true,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "id": 100,
+          "title": "API / Database",
+          "type": "row",
+          "collapsed": false,
+          "panels": [],
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "id": 1,
+          "title": "Backend scrape",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "1 = Prometheus can scrape backend /metrics.",
+          "gridPos": {
+            "x": 0,
+            "y": 1,
+            "w": 4,
+            "h": 5
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DOWN"
+                    },
+                    "1": {
+                      "text": "UP"
+                    }
+                  }
+                }
+              ]
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "expr": "max(up{job=\"backend\"}) or vector(0)",
+              "refId": "A",
+              "legendFormat": "",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Request rate",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "Requests per second over two minutes.",
+          "gridPos": {
+            "x": 4,
+            "y": 1,
+            "w": 5,
+            "h": 5
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "decimals": 2,
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(backend_requests_total[2m])) or vector(0)",
+              "refId": "A",
+              "legendFormat": "",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "P95 API latency",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "P95 of the backend Prometheus histogram.",
+          "gridPos": {
+            "x": 9,
+            "y": 1,
+            "w": 5,
+            "h": 5
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms",
+              "decimals": 2,
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "expr": "(1000 * histogram_quantile(0.95, sum by (le) (rate(backend_request_duration_seconds_bucket[5m])))) or vector(0)",
+              "refId": "A",
+              "legendFormat": "",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "5xx rate",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "HTTP 5xx percentage.",
+          "gridPos": {
+            "x": 14,
+            "y": 1,
+            "w": 5,
+            "h": 5
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "decimals": 2,
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "expr": "(100 * sum(rate(backend_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(backend_requests_total[5m])), 0.000001)) or vector(0)",
+              "refId": "A",
+              "legendFormat": "",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "title": "OpenCost scrape",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "1 = Prometheus can scrape OpenCost.",
+          "gridPos": {
+            "x": 19,
+            "y": 1,
+            "w": 5,
+            "h": 5
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "mappings": [
+                {
+                  "type": "value",
+                  "options": {
+                    "0": {
+                      "text": "DOWN"
+                    },
+                    "1": {
+                      "text": "UP"
+                    }
+                  }
+                }
+              ]
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "expr": "max(up{job=\"opencost\"}) or vector(0)",
+              "refId": "A",
+              "legendFormat": "",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "title": "API latency",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "Real /work request latency from the application histogram.",
+          "gridPos": {
+            "x": 0,
+            "y": 6,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(1000 * histogram_quantile(0.50, sum by (le) (rate(backend_request_duration_seconds_bucket[5m])))) or vector(0)",
+              "refId": "A",
+              "legendFormat": "P50"
+            },
+            {
+              "expr": "(1000 * histogram_quantile(0.95, sum by (le) (rate(backend_request_duration_seconds_bucket[5m])))) or vector(0)",
+              "refId": "B",
+              "legendFormat": "P95"
+            },
+            {
+              "expr": "(1000 * histogram_quantile(0.99, sum by (le) (rate(backend_request_duration_seconds_bucket[5m])))) or vector(0)",
+              "refId": "C",
+              "legendFormat": "P99"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "title": "Requests by status",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "Request throughput split by response status.",
+          "gridPos": {
+            "x": 12,
+            "y": 6,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (status) (rate(backend_requests_total[2m])) or vector(0)",
+              "refId": "A",
+              "legendFormat": "{{status}}"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "title": "DB P95 latency",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "PostgreSQL operation latency by operation.",
+          "gridPos": {
+            "x": 0,
+            "y": 14,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(1000 * histogram_quantile(0.95, sum by (le, operation) (rate(backend_db_operation_duration_seconds_bucket[5m])))) or vector(0)",
+              "refId": "A",
+              "legendFormat": "{{operation}}"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "title": "DB operations",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "PostgreSQL operations per second.",
+          "gridPos": {
+            "x": 12,
+            "y": 14,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (operation,status) (rate(backend_db_operations_total[2m])) or vector(0)",
+              "refId": "A",
+              "legendFormat": "{{operation}} / {{status}}"
+            }
+          ]
+        },
+        {
+          "id": 110,
+          "title": "Kubernetes workload",
+          "type": "row",
+          "collapsed": false,
+          "panels": [],
+          "gridPos": {
+            "x": 0,
+            "y": 22,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "id": 10,
+          "title": "Backend CPU",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "Actual backend CPU usage.",
+          "gridPos": {
+            "x": 0,
+            "y": 23,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "cores"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"application\",container=\"backend\"}[5m])) or vector(0)",
+              "refId": "A",
+              "legendFormat": "CPU"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "title": "Backend memory",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "Backend working-set memory.",
+          "gridPos": {
+            "x": 8,
+            "y": 23,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "mbytes"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(sum(container_memory_working_set_bytes{namespace=\"application\",container=\"backend\"}) / 1024 / 1024) or vector(0)",
+              "refId": "A",
+              "legendFormat": "Memory"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "title": "CPU throttling",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "CPU throttled time per second.",
+          "gridPos": {
+            "x": 16,
+            "y": 23,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ms"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(1000 * sum(rate(container_cpu_cfs_throttled_seconds_total{namespace=\"application\",container=\"backend\"}[5m]))) or vector(0)",
+              "refId": "A",
+              "legendFormat": "Throttle"
+            }
+          ]
+        },
+        {
+          "id": 13,
+          "title": "Backend restarts",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "Container restarts.",
+          "gridPos": {
+            "x": 0,
+            "y": 31,
+            "w": 6,
+            "h": 5
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "decimals": 0,
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_container_status_restarts_total{namespace=\"application\",container=\"backend\"}) or vector(0)",
+              "refId": "A",
+              "legendFormat": "",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 14,
+          "title": "CPU requested",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "Requested backend CPU.",
+          "gridPos": {
+            "x": 6,
+            "y": 31,
+            "w": 6,
+            "h": 5
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "cores",
+              "decimals": 2,
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_container_resource_requests{namespace=\"application\",container=\"backend\",resource=\"cpu\"}) or vector(0)",
+              "refId": "A",
+              "legendFormat": "",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 15,
+          "title": "Memory requested",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "Requested backend memory.",
+          "gridPos": {
+            "x": 12,
+            "y": 31,
+            "w": 6,
+            "h": 5
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "mbytes",
+              "decimals": 2,
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "expr": "(sum(kube_pod_container_resource_requests{namespace=\"application\",container=\"backend\",resource=\"memory\"}) / 1024 / 1024) or vector(0)",
+              "refId": "A",
+              "legendFormat": "",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "title": "Monthly node cost",
+          "type": "stat",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "OpenCost estimate for provisioned nodes, using 730 h/month.",
+          "gridPos": {
+            "x": 18,
+            "y": 31,
+            "w": 6,
+            "h": 5
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 2,
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "targets": [
+            {
+              "expr": "(sum(node_total_hourly_cost) * 730) or vector(0)",
+              "refId": "A",
+              "legendFormat": "",
+              "instant": true
+            }
+          ]
+        },
+        {
+          "id": 120,
+          "title": "Nodes",
+          "type": "row",
+          "collapsed": false,
+          "panels": [],
+          "gridPos": {
+            "x": 0,
+            "y": 36,
+            "w": 24,
+            "h": 1
+          }
+        },
+        {
+          "id": 17,
+          "title": "Node CPU usage",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "Node CPU utilization.",
+          "gridPos": {
+            "x": 0,
+            "y": 37,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])))) or vector(0)",
+              "refId": "A",
+              "legendFormat": "{{instance}}"
+            }
+          ]
+        },
+        {
+          "id": 18,
+          "title": "Node memory usage",
+          "type": "timeseries",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mimir"
+          },
+          "description": "Node memory utilization.",
+          "gridPos": {
+            "x": 12,
+            "y": 37,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))) or vector(0)",
+              "refId": "A",
+              "legendFormat": "{{instance}}"
+            }
+          ]
+        },
+        {
+          "id": 19,
+          "title": "Dashboard behavior",
+          "type": "text",
+          "gridPos": {
+            "x": 0,
+            "y": 45,
+            "w": 24,
+            "h": 5
+          },
+          "options": {
+            "mode": "markdown",
+            "content": "### Clean metric policy\n- This dashboard intentionally uses a small allowlist of raw metrics.\n- **0 during idle time is normal** for request/DB panels; it is no longer shown as `No data`.\n- `Backend scrape = DOWN` means Prometheus cannot reach `/metrics`; fix scraping before trusting other application panels.\n- OpenCost is an operational estimate, not the AWS invoice.\n- Traces stay in Tempo, logs in Loki, profiles in Pyroscope; request IDs and trace IDs do **not** belong in Mimir labels."
+          }
+        }
+      ],
+      "refresh": "30s",
+      "schemaVersion": 41,
+      "tags": [
+        "eks",
+        "mimir",
+        "backend",
+        "finops",
+        "clean"
+      ],
+      "templating": {
+        "list": []
+      },
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "timepicker": {
+        "refresh_intervals": [
+          "10s",
+          "30s",
+          "1m",
+          "5m",
+          "15m",
+          "1h"
+        ]
+      },
+      "timezone": "browser",
+      "title": "EKS Service / Resource / Cost",
+      "uid": "eks-service-core",
+      "version": 1,
+      "weekStart": ""
+    }

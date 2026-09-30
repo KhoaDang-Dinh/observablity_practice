@@ -15,11 +15,11 @@ export const options = {
     },
   },
   thresholds: {
-    // The demo app intentionally injects ~10% HTTP 500 responses.
-    // Keep the first gate above that baseline; tighten it when the fault
-    // injection is disabled for a production-style exercise.
+    // Keep request failures as a hard release gate.
+    // Latency is still measured by k6 and shown in the job output, but the
+    // instance-sizing workflow owns the hard P95 decision because it compares
+    // candidate EC2 types under the same controlled load.
     http_req_failed: ['rate<0.15'],
-    http_req_duration: ['p(95)<1500'],
   },
 };
 

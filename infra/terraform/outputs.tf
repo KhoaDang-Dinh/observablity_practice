@@ -62,3 +62,24 @@ output "selected_node_instance_type" {
 output "benchmark_mode" {
   value = var.benchmark_mode
 }
+
+output "availability_zones" {
+  description = "The two AZs available to the recoverable EKS/RDS design."
+  value       = local.azs
+}
+
+output "db_backup_retention_days" {
+  description = "Automated RDS backup/PITR retention configured for Single-AZ recovery."
+  value       = aws_db_instance.postgres.backup_retention_period
+}
+
+output "recovery_profile" {
+  description = "Summary of the low-cost recovery posture."
+  value = {
+    eks_normal_workers = var.node_desired_size
+    eks_max_workers    = var.node_max_size
+    eks_subnets        = module.vpc.public_subnets
+    rds_multi_az       = aws_db_instance.postgres.multi_az
+    rds_backup_days    = aws_db_instance.postgres.backup_retention_period
+  }
+}

@@ -83,3 +83,21 @@ output "recovery_profile" {
     rds_backup_days    = aws_db_instance.postgres.backup_retention_period
   }
 }
+
+output "fis_az_experiment_template_ids" {
+  description = "AWS FIS AZ failure experiment template IDs keyed by Availability Zone."
+  value       = { for az, template in aws_fis_experiment_template.az_failure : az => template.id }
+}
+
+output "fis_experiment_role_arn" {
+  description = "IAM role assumed by AWS FIS while running the AZ failure drill."
+  value       = aws_iam_role.fis_az_failure.arn
+}
+
+output "lab_node_group_name" {
+  description = "Normal EKS managed node group name used by the AZ failure drill."
+  value = var.benchmark_mode ? null : try(
+    split(":", module.eks.eks_managed_node_groups["lab"].node_group_id)[1],
+    null
+  )
+}

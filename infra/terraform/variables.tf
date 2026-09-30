@@ -47,19 +47,21 @@ variable "selected_node_instance_type" {
 }
 
 variable "node_min_size" {
-  description = "Keep two workers so rolling updates and observability pods have scheduling headroom."
+  description = "Recoverable lab baseline: keep one EKS worker running during normal operation."
   type        = number
-  default     = 2
+  default     = 1
 }
 
 variable "node_desired_size" {
-  type    = number
-  default = 2
+  description = "Normal operating worker count. The node group spans both AZ subnets, but only one worker is required while healthy."
+  type        = number
+  default     = 1
 }
 
 variable "node_max_size" {
-  type    = number
-  default = 2
+  description = "Allow one replacement/additional worker during recovery or temporary capacity pressure."
+  type        = number
+  default     = 2
 }
 
 variable "node_disk_size_gib" {
@@ -132,4 +134,15 @@ variable "enable_cur2_export" {
   description = "Create a CUR 2.0 Data Export with hourly resource-level cost data in a dedicated S3 bucket."
   type        = bool
   default     = false
+}
+
+variable "db_backup_retention_days" {
+  description = "Days of automated RDS backups/PITR history. Keep > 0 so a Single-AZ database can be restored after an AZ-level failure."
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.db_backup_retention_days >= 1 && var.db_backup_retention_days <= 35
+    error_message = "db_backup_retention_days must be between 1 and 35."
+  }
 }

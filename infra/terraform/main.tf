@@ -208,6 +208,9 @@ module "eks" {
         desired_size = var.node_desired_size
         max_size     = var.node_max_size
 
+        # The managed node group spans both AZ subnets. desired_size=1 keeps
+        # only one worker in normal operation; if its AZ/instance is lost,
+        # the ASG can replace it in the surviving subnet/AZ.
         subnet_ids = module.vpc.public_subnets
 
         block_device_mappings = {
@@ -315,8 +318,11 @@ resource "aws_db_instance" "postgres" {
   publicly_accessible    = false
   multi_az               = false
 
-  backup_retention_period = 0
-  skip_final_snapshot     = true
+  # Single-AZ by design to keep the lab cheap. Recovery relies on automated
+  # backups/PITR rather than a continuously running Multi-AZ standby.
+  backup_retention_period = var.db_backup_retention_days
+  copy_tags_to_snapshot    = true
+  skip_final_snapshot      = true
   deletion_protection     = false
   apply_immediately       = true
 

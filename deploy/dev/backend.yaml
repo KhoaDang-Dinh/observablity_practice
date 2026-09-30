@@ -59,13 +59,7 @@ data:
         retry_on_failure:
           enabled: true
 
-      prometheusremotewrite/mimir:
-        endpoint: http://mimir.observability.svc.cluster.local:9009/api/v1/push
-        resource_to_telemetry_conversion:
-          enabled: true
-        remote_write_queue:
-          enabled: true
-          queue_size: 2048
+      nop: {}
 
     extensions:
       health_check:
@@ -81,7 +75,10 @@ data:
         metrics:
           receivers: [otlp]
           processors: [memory_limiter, k8sattributes, batch]
-          exporters: [prometheusremotewrite/mimir]
+          # Application metrics are scraped from /metrics by Prometheus.
+          # Keep the OTLP receiver active, but do not duplicate those metrics
+          # into Mimir with a second label schema.
+          exporters: [nop]
         logs:
           receivers: [otlp]
           processors: [memory_limiter, k8sattributes, batch]

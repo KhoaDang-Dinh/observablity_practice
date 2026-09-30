@@ -1,0 +1,504 @@
+name: AZ Failure Drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type FAIL-AZ to confirm this disruptive lab experiment"
+        required: true
+        type: string
+      target:
+        description: "Which AZ should be impaired?"
+        required: true
+        default: worker-az
+        type: choice
+        options:
+          - worker-az
+          - rds-az
+          - az-0
+          - az-1
+      duration_minutes:
+        description: "How long should the worker/ASG fault remain active?"
+        required: true
+        default: "5"
+        type: choice
+        options:
+          - "5"
+          - "10"
+
+concurrency:
+  group: day3-az-failure-drill
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-southeast-1
+  TF_DIR: infra/terraform
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+  TF_STATE_KEY: terraform/day3/dev/terraform.tfstate
+  TERRAFORM_VERSION: 1.16.2
+
+jobs:
+  az-failure:
+    name: AWS FIS AZ failure simulation
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'FAIL-AZ'
+
+    steps:
+      - name: Checkout Dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: az-failure-${{ github.run_id }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$TF_STATE_BUCKET"
+          terraform init \
+            -input=false \
+            -reconfigure \
+            -backend-config="bucket=$TF_STATE_BUCKET" \
+            -backend-config="key=$TF_STATE_KEY" \
+            -backend-config="region=$AWS_REGION" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v5.1.0
+        with:
+          version: latest
+
+      - name: Discover live recovery topology
+        id: discover
+        working-directory: ${{ env.TF_DIR }}
+        shell: bash
+        env:
+          TARGET_MODE: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+
+          CLUSTER_NAME="$(terraform output -raw cluster_name)"
+          VPC_ID="$(terraform output -raw vpc_id)"
+          FIS_ROLE_ARN="$(terraform output -raw fis_experiment_role_arn)"
+          mapfile -t AZS < <(terraform output -json availability_zones | jq -r '.[]')
+
+          aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
+
+          NODEGROUP=""
+          while read -r ng; do
+            workload="$(aws eks describe-nodegroup \
+              --cluster-name "$CLUSTER_NAME" \
+              --nodegroup-name "$ng" \
+              --query 'nodegroup.labels.workload' \
+              --output text 2>/dev/null || true)"
+            if [ "$workload" = "day3-lab" ]; then
+              NODEGROUP="$ng"
+              break
+            fi
+          done < <(aws eks list-nodegroups \
+            --cluster-name "$CLUSTER_NAME" \
+            --query 'nodegroups[]' \
+            --output text | tr '\t' '\n')
+
+          if [ -z "$NODEGROUP" ]; then
+            echo "Could not find the normal day3-lab managed node group."
+            exit 1
+          fi
+
+          ASG_NAME="$(aws eks describe-nodegroup \
+            --cluster-name "$CLUSTER_NAME" \
+            --nodegroup-name "$NODEGROUP" \
+            --query 'nodegroup.resources.autoScalingGroups[0].name' \
+            --output text)"
+
+          ASG_ARN="$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "$ASG_NAME" \
+            --query 'AutoScalingGroups[0].AutoScalingGroupARN' \
+            --output text)"
+
+          WORKER_ID="$(aws ec2 describe-instances \
+            --filters \
+              "Name=tag:aws:autoscaling:groupName,Values=$ASG_NAME" \
+              "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text | awk '{print $1}')"
+
+          if [ -z "$WORKER_ID" ] || [ "$WORKER_ID" = "None" ]; then
+            echo "No running worker found in the normal node group."
+            exit 1
+          fi
+
+          WORKER_AZ="$(aws ec2 describe-instances \
+            --instance-ids "$WORKER_ID" \
+            --query 'Reservations[0].Instances[0].Placement.AvailabilityZone' \
+            --output text)"
+
+          RDS_ID="${CLUSTER_NAME}-postgres"
+          RDS_AZ="$(aws rds describe-db-instances \
+            --db-instance-identifier "$RDS_ID" \
+            --query 'DBInstances[0].AvailabilityZone' \
+            --output text)"
+
+          case "$TARGET_MODE" in
+            worker-az) TARGET_AZ="$WORKER_AZ" ;;
+            rds-az)    TARGET_AZ="$RDS_AZ" ;;
+            az-0)      TARGET_AZ="${AZS[0]}" ;;
+            az-1)      TARGET_AZ="${AZS[1]}" ;;
+            *) echo "Unknown target mode: $TARGET_MODE"; exit 1 ;;
+          esac
+
+          OTHER_AZ=""
+          for az in "${AZS[@]}"; do
+            if [ "$az" != "$TARGET_AZ" ]; then
+              OTHER_AZ="$az"
+              break
+            fi
+          done
+
+          mapfile -t TARGET_SUBNETS < <(aws ec2 describe-subnets \
+            --filters "Name=vpc-id,Values=$VPC_ID" "Name=availability-zone,Values=$TARGET_AZ" \
+            --query 'Subnets[].SubnetId' \
+            --output text | tr '\t' '\n')
+
+          mapfile -t TARGET_WORKERS < <(aws ec2 describe-instances \
+            --filters \
+              "Name=tag:aws:autoscaling:groupName,Values=$ASG_NAME" \
+              "Name=availability-zone,Values=$TARGET_AZ" \
+              "Name=instance-state-name,Values=running" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text | tr '\t' '\n' | sed '/^$/d')
+
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+
+          echo "CLUSTER_NAME=$CLUSTER_NAME" >> "$GITHUB_ENV"
+          echo "VPC_ID=$VPC_ID" >> "$GITHUB_ENV"
+          echo "FIS_ROLE_ARN=$FIS_ROLE_ARN" >> "$GITHUB_ENV"
+          echo "NODEGROUP=$NODEGROUP" >> "$GITHUB_ENV"
+          echo "ASG_NAME=$ASG_NAME" >> "$GITHUB_ENV"
+          echo "ASG_ARN=$ASG_ARN" >> "$GITHUB_ENV"
+          echo "WORKER_AZ=$WORKER_AZ" >> "$GITHUB_ENV"
+          echo "RDS_AZ=$RDS_AZ" >> "$GITHUB_ENV"
+          echo "TARGET_AZ=$TARGET_AZ" >> "$GITHUB_ENV"
+          echo "OTHER_AZ=$OTHER_AZ" >> "$GITHUB_ENV"
+          echo "ACCOUNT_ID=$ACCOUNT_ID" >> "$GITHUB_ENV"
+
+          printf '%s\n' "${TARGET_SUBNETS[@]}" > /tmp/target-subnets.txt
+          printf '%s\n' "${TARGET_WORKERS[@]}" > /tmp/target-workers.txt
+
+          echo "### AZ Failure Drill topology" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Cluster: `$CLUSTER_NAME`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Node group: `$NODEGROUP`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Worker AZ: `$WORKER_AZ`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- RDS AZ: `$RDS_AZ`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Target AZ: **`$TARGET_AZ`**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Expected surviving AZ: `$OTHER_AZ`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Target subnets: `${TARGET_SUBNETS[*]}`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Workers directly stopped: `${TARGET_WORKERS[*]:-none}`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Baseline health
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl get nodes -L topology.kubernetes.io/zone
+          kubectl get pods -A -o wide
+
+          APP_HOST="$(kubectl get svc backend -n application -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+          if [ -z "$APP_HOST" ]; then
+            APP_HOST="$(kubectl get svc backend -n application -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+          fi
+          echo "APP_HOST=$APP_HOST" >> "$GITHUB_ENV"
+
+          if [ -n "$APP_HOST" ]; then
+            curl --max-time 10 -fsS "http://$APP_HOST/health"
+            curl --max-time 10 -fsS "http://$APP_HOST/db"
+          fi
+
+      - name: Build FIS experiment template
+        shell: bash
+        env:
+          DURATION_MINUTES: ${{ inputs.duration_minutes }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t SUBNET_IDS < /tmp/target-subnets.txt
+          mapfile -t WORKER_IDS < /tmp/target-workers.txt
+
+          SUBNET_ARNS="$(printf '%s\n' "${SUBNET_IDS[@]}" | jq -R -s \
+            --arg region "$AWS_REGION" \
+            --arg account "$ACCOUNT_ID" \
+            'split("\n") | map(select(length>0)) | map("arn:aws:ec2:" + $region + ":" + $account + ":subnet/" + .)')"
+
+          TARGETS="$(jq -n \
+            --argjson subnetArns "$SUBNET_ARNS" \
+            --arg asgArn "$ASG_ARN" \
+            '{
+              FailedAZSubnets: {
+                resourceType: "aws:ec2:subnet",
+                resourceArns: $subnetArns,
+                selectionMode: "ALL"
+              },
+              NodeGroupASG: {
+                resourceType: "aws:ec2:autoscaling-group",
+                resourceArns: [$asgArn],
+                selectionMode: "ALL"
+              }
+            }')"
+
+          ACTIONS="$(jq -n \
+            --arg az "$TARGET_AZ" \
+            --arg duration "PT${DURATION_MINUTES}M" \
+            '{
+              PauseASGScalingInFailedAZ: {
+                actionId: "aws:ec2:asg-insufficient-instance-capacity-error",
+                parameters: {
+                  availabilityZoneIdentifiers: $az,
+                  duration: $duration,
+                  percentage: "100"
+                },
+                targets: {
+                  AutoScalingGroups: "NodeGroupASG"
+                }
+              },
+              DisruptFailedAZSubnets: {
+                actionId: "aws:network:disrupt-connectivity",
+                parameters: {
+                  duration: "PT2M",
+                  scope: "all"
+                },
+                targets: {
+                  Subnets: "FailedAZSubnets"
+                }
+              }
+            }')"
+
+          if [ "${#WORKER_IDS[@]}" -gt 0 ] && [ -n "${WORKER_IDS[0]}" ]; then
+            WORKER_ARNS="$(printf '%s\n' "${WORKER_IDS[@]}" | jq -R -s \
+              --arg region "$AWS_REGION" \
+              --arg account "$ACCOUNT_ID" \
+              'split("\n") | map(select(length>0)) | map("arn:aws:ec2:" + $region + ":" + $account + ":instance/" + .)')"
+
+            TARGETS="$(jq \
+              --argjson workerArns "$WORKER_ARNS" \
+              '. + {
+                FailedAZWorkers: {
+                  resourceType: "aws:ec2:instance",
+                  resourceArns: $workerArns,
+                  selectionMode: "ALL"
+                }
+              }' <<< "$TARGETS")"
+
+            ACTIONS="$(jq \
+              --arg duration "PT${DURATION_MINUTES}M" \
+              '. + {
+                StopWorkersInFailedAZ: {
+                  actionId: "aws:ec2:stop-instances",
+                  parameters: {
+                    startInstancesAfterDuration: $duration,
+                    completeIfInstancesTerminated: "true"
+                  },
+                  targets: {
+                    Instances: "FailedAZWorkers"
+                  }
+                }
+              }' <<< "$ACTIONS")"
+          fi
+
+          jq -n \
+            --arg description "day3 recoverable architecture AZ failure drill: $TARGET_AZ" \
+            --arg roleArn "$FIS_ROLE_ARN" \
+            --argjson targets "$TARGETS" \
+            --argjson actions "$ACTIONS" \
+            --arg project "day3-cicd-lgtm" \
+            --arg targetAz "$TARGET_AZ" \
+            '{
+              description: $description,
+              roleArn: $roleArn,
+              stopConditions: [{source: "none"}],
+              targets: $targets,
+              actions: $actions,
+              tags: {
+                Project: $project,
+                Purpose: "az-failure-drill",
+                TargetAZ: $targetAz
+              }
+            }' > /tmp/fis-template.json
+
+          jq . /tmp/fis-template.json
+
+      - name: Create and start AWS FIS experiment
+        id: fis
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TEMPLATE_ID="$(aws fis create-experiment-template \
+            --cli-input-json file:///tmp/fis-template.json \
+            --query 'experimentTemplate.id' \
+            --output text)"
+
+          echo "template_id=$TEMPLATE_ID" >> "$GITHUB_OUTPUT"
+          echo "FIS_TEMPLATE_ID=$TEMPLATE_ID" >> "$GITHUB_ENV"
+
+          EXPERIMENT_ID="$(aws fis start-experiment \
+            --experiment-template-id "$TEMPLATE_ID" \
+            --client-token "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --tags Project=day3-cicd-lgtm,Purpose=az-failure-drill \
+            --query 'experiment.id' \
+            --output text)"
+
+          echo "experiment_id=$EXPERIMENT_ID" >> "$GITHUB_OUTPUT"
+          echo "FIS_EXPERIMENT_ID=$EXPERIMENT_ID" >> "$GITHUB_ENV"
+
+          echo "FIS experiment: $EXPERIMENT_ID"
+          echo "- FIS experiment: `$EXPERIMENT_ID`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Observe AZ recovery
+        shell: bash
+        env:
+          DURATION_MINUTES: ${{ inputs.duration_minutes }}
+        run: |
+          set -u
+          START_EPOCH="$(date +%s)"
+          RECOVERED=false
+          DEADLINE=$((START_EPOCH + (DURATION_MINUTES * 60) + 900))
+
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            FIS_STATUS="$(aws fis get-experiment \
+              --id "$FIS_EXPERIMENT_ID" \
+              --query 'experiment.state.status' \
+              --output text 2>/dev/null || echo unknown)"
+
+            READY_NODES="$(kubectl get nodes \
+              -l "topology.kubernetes.io/zone=$OTHER_AZ" \
+              --no-headers 2>/dev/null | awk '$2=="Ready"{count++} END{print count+0}')"
+
+            BACKEND_READY="$(kubectl get deployment backend -n application \
+              -o jsonpath='{.status.availableReplicas}' 2>/dev/null || echo 0)"
+            BACKEND_READY="${BACKEND_READY:-0}"
+
+            HTTP_OK=false
+            if [ -n "${APP_HOST:-}" ] && curl --max-time 5 -fsS "http://$APP_HOST/health" >/dev/null 2>&1; then
+              HTTP_OK=true
+            fi
+
+            printf '%s FIS=%s survivingAZReadyNodes=%s backendReady=%s http=%s\n' \
+              "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$FIS_STATUS" "$READY_NODES" "$BACKEND_READY" "$HTTP_OK"
+
+            # Only require a new node in the other AZ if a worker was actually
+            # targeted in the failed AZ. If the drill targets only the RDS AZ,
+            # compute can legitimately remain where it is.
+            if [ -s /tmp/target-workers.txt ]; then
+              if [ "$READY_NODES" -ge 1 ] && [ "$BACKEND_READY" -ge 1 ] && [ "$HTTP_OK" = true ]; then
+                RECOVERED=true
+                break
+              fi
+            else
+              if [ "$BACKEND_READY" -ge 1 ] && [ "$HTTP_OK" = true ]; then
+                RECOVERED=true
+                break
+              fi
+            fi
+
+            sleep 20
+          done
+
+          END_EPOCH="$(date +%s)"
+          RTO=$((END_EPOCH - START_EPOCH))
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Recovery observation" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Observed recovery time: **${RTO}s**" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Recovery criteria met: **$RECOVERED**" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$RECOVERED" != true ]; then
+            echo "Recovery criteria were not met before the deadline."
+            kubectl get nodes -L topology.kubernetes.io/zone || true
+            kubectl get pods -A -o wide || true
+            exit 1
+          fi
+
+      - name: Wait for FIS completion
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [ -z "${FIS_EXPERIMENT_ID:-}" ]; then
+            exit 0
+          fi
+
+          for i in {1..90}; do
+            STATUS="$(aws fis get-experiment \
+              --id "$FIS_EXPERIMENT_ID" \
+              --query 'experiment.state.status' \
+              --output text 2>/dev/null || echo unknown)"
+            echo "FIS status: $STATUS"
+            case "$STATUS" in
+              completed|stopped|failed) break ;;
+            esac
+            sleep 10
+          done
+
+      - name: Final validation
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          kubectl get nodes -L topology.kubernetes.io/zone
+          kubectl get pods -A -o wide
+
+          if [ -n "${APP_HOST:-}" ]; then
+            echo "Health:"
+            curl --max-time 10 -fsS "http://$APP_HOST/health" || true
+            echo
+            echo "DB:"
+            curl --max-time 10 -fsS "http://$APP_HOST/db" || true
+            echo
+          fi
+
+      - name: Cleanup temporary FIS template
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          if [ -n "${FIS_EXPERIMENT_ID:-}" ]; then
+            STATUS="$(aws fis get-experiment \
+              --id "$FIS_EXPERIMENT_ID" \
+              --query 'experiment.state.status' \
+              --output text 2>/dev/null || true)"
+            case "$STATUS" in
+              running|initiating|pending)
+                aws fis stop-experiment --id "$FIS_EXPERIMENT_ID" || true
+                ;;
+            esac
+          fi
+
+          if [ -n "${FIS_TEMPLATE_ID:-}" ]; then
+            for i in {1..30}; do
+              if aws fis delete-experiment-template \
+                --id "$FIS_TEMPLATE_ID" >/dev/null 2>&1; then
+                echo "Deleted temporary FIS template $FIS_TEMPLATE_ID"
+                break
+              fi
+              sleep 5
+            done
+          fi

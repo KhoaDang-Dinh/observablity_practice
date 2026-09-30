@@ -120,6 +120,7 @@ jobs:
     needs: [benchmark-infrastructure]
     outputs:
       image: ${{ steps.image.outputs.image }}
+      ft_image: ${{ steps.ft-image.outputs.image }}
 
     steps:
       - uses: actions/checkout@v4
@@ -155,6 +156,22 @@ jobs:
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
+      - name: Build Python 3.14 free-threaded benchmark image
+        id: ft-image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          FT_IMAGE="${REGISTRY}/${ECR_REPOSITORY}:python314t-${GITHUB_SHA}"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --pull \
+            --push \
+            -t "$FT_IMAGE" \
+            tests/python314t
+          echo "image=$FT_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "FT_IMAGE=$FT_IMAGE" >> "$GITHUB_ENV"
+
       - name: Trivy scan both image architectures
         run: |
           set -euo pipefail
@@ -162,6 +179,10 @@ jobs:
             image --platform linux/amd64 --severity CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
           docker run --rm -v "$HOME/.docker:/root/.docker:ro" aquasec/trivy:latest \
             image --platform linux/arm64 --severity CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
+          docker run --rm -v "$HOME/.docker:/root/.docker:ro" aquasec/trivy:latest \
+            image --platform linux/amd64 --severity CRITICAL --ignore-unfixed --exit-code 1 "$FT_IMAGE"
+          docker run --rm -v "$HOME/.docker:/root/.docker:ro" aquasec/trivy:latest \
+            image --platform linux/arm64 --severity CRITICAL --ignore-unfixed --exit-code 1 "$FT_IMAGE"
 
   benchmark:
     name: Benchmark EKS node candidates
@@ -360,6 +381,85 @@ jobs:
             kubectl rollout status deployment/bench-${C} -n "$BENCHMARK_NAMESPACE" --timeout=10m
           done
 
+      - name: Deploy Python 3.14 free-threaded A/B workloads
+        env:
+          FT_IMAGE: ${{ needs.build.outputs.ft_image }}
+        run: |
+          set -euo pipefail
+          CANDIDATES="t4g-medium c7g-large m7g-large t3-medium c7i-large m7i-large"
+
+          for C in $CANDIDATES; do
+            for MODE in gil nogil; do
+              if [ "$MODE" = "gil" ]; then
+                GIL_VALUE=1
+              else
+                GIL_VALUE=0
+              fi
+
+              cat <<EOF | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: py314t-${MODE}-${C}
+            namespace: ${BENCHMARK_NAMESPACE}
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: py314t-${MODE}-${C}
+            template:
+              metadata:
+                labels:
+                  app: py314t-${MODE}-${C}
+              spec:
+                nodeSelector:
+                  capacity.candidate: ${C}
+                tolerations:
+                  - key: capacity-benchmark
+                    operator: Equal
+                    value: "true"
+                    effect: NoSchedule
+                containers:
+                  - name: python314t
+                    image: ${FT_IMAGE}
+                    env:
+                      - name: PYTHON_GIL
+                        value: "${GIL_VALUE}"
+                      - name: EXPECTED_GIL
+                        value: "${GIL_VALUE}"
+                      - name: CPU_WORK_ITERATIONS
+                        value: "250000"
+                    ports:
+                      - name: http
+                        containerPort: 8080
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 96Mi
+                      limits:
+                        cpu: "2"
+                        memory: 256Mi
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: py314t-${MODE}-${C}
+            namespace: ${BENCHMARK_NAMESPACE}
+          spec:
+            selector:
+              app: py314t-${MODE}-${C}
+            ports:
+              - port: 80
+                targetPort: http
+          EOF
+            done
+          done
+
+          for C in $CANDIDATES; do
+            kubectl rollout status deployment/py314t-gil-${C} -n "$BENCHMARK_NAMESPACE" --timeout=10m
+            kubectl rollout status deployment/py314t-nogil-${C} -n "$BENCHMARK_NAMESPACE" --timeout=10m
+          done
+
       - name: Run identical 10-concurrency benchmark
         id: select
         env:
@@ -440,6 +540,76 @@ jobs:
             echo '```'
             echo
             echo "Passing candidates: ${PASSERS}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Python 3.14 free-threaded GIL vs no-GIL experiment
+        env:
+          CONCURRENCY: ${{ inputs.concurrency }}
+        run: |
+          set -euo pipefail
+          mkdir -p benchmark-results/python314t
+          : > benchmark-results/python314t/results.tsv
+
+          declare -A TYPES=(
+            [t4g-medium]="t4g.medium"
+            [c7g-large]="c7g.large"
+            [m7g-large]="m7g.large"
+            [t3-medium]="t3.medium"
+            [c7i-large]="c7i.large"
+            [m7i-large]="m7i.large"
+          )
+
+          for C in t4g-medium c7g-large m7g-large t3-medium c7i-large m7i-large; do
+            for MODE in gil nogil; do
+              echo "=== Python 3.14t: ${TYPES[$C]} / ${MODE} ==="
+              kubectl port-forward -n "$BENCHMARK_NAMESPACE" svc/py314t-${MODE}-${C} 18081:80 >/tmp/py314t-${MODE}-${C}.log 2>&1 &
+              PF_PID=$!
+              trap 'kill "$PF_PID" >/dev/null 2>&1 || true' EXIT
+
+              HEALTH=""
+              for i in {1..30}; do
+                HEALTH="$(curl -fsS http://127.0.0.1:18081/health 2>/dev/null || true)"
+                [ -n "$HEALTH" ] && break
+                sleep 2
+              done
+
+              echo "$HEALTH" | jq .
+              test "$(jq -r '.free_threaded_build' <<< "$HEALTH")" = "true"
+              if [ "$MODE" = "gil" ]; then
+                test "$(jq -r '.gil_enabled' <<< "$HEALTH")" = "true"
+              else
+                test "$(jq -r '.gil_enabled' <<< "$HEALTH")" = "false"
+              fi
+
+              docker run --rm --network host \
+                -e BASE_URL=http://127.0.0.1:18081 \
+                -e CONCURRENCY="$CONCURRENCY" \
+                -e DURATION=30s \
+                -v "$PWD:/work" -w /work \
+                grafana/k6:latest \
+                run --summary-export "/work/benchmark-results/python314t/${C}-${MODE}.json" tests/k6/python314t.js
+
+              kill "$PF_PID" >/dev/null 2>&1 || true
+              trap - EXIT
+
+              P95="$(jq -r '.metrics.http_req_duration.values["p(95)"] // 999999' "benchmark-results/python314t/${C}-${MODE}.json")"
+              RATE="$(jq -r '.metrics.http_reqs.values.rate // 0' "benchmark-results/python314t/${C}-${MODE}.json")"
+              printf "%s\t%s\t%s\t%s\n" "${TYPES[$C]}" "$MODE" "$P95" "$RATE" >> benchmark-results/python314t/results.tsv
+            done
+          done
+
+          {
+            echo "## Python 3.14 free-threaded experiment"
+            echo
+            echo "Same free-threaded CPython build, same node, same pure-Python CPU workload."
+            echo "PYTHON_GIL=1 is the control; PYTHON_GIL=0 is the no-GIL run."
+            echo
+            echo '```'
+            echo "instance_type  mode   p95_ms  req_per_sec"
+            column -t benchmark-results/python314t/results.tsv || cat benchmark-results/python314t/results.tsv
+            echo '```'
+            echo
+            echo "This experiment is informational. Node eligibility still comes from the real /work API SLO."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Cleanup benchmark workloads

@@ -57,3 +57,18 @@ estimated_cost_per_request = projected_monthly_infrastructure_cost / 5000
 ```
 
 Normal releases do not repeat the six-node benchmark. They reuse `infra/terraform/capacity.auto.tfvars.json`. Re-run the bootstrap workflow when the workload, dependencies, SLO, or resource profile changes materially.
+
+## Python 3.14 free-threaded experiment
+
+The right-sizing workflow also runs a controlled CPython 3.14 free-threading experiment on every candidate node.
+
+Two pods use the same free-threaded interpreter build and the same pure-Python CPU workload:
+
+```text
+control:  PYTHON_GIL=1
+test:     PYTHON_GIL=0
+```
+
+Each pod verifies at startup that `sysconfig.get_config_var("Py_GIL_DISABLED") == 1`. The health endpoint also reports `sys._is_gil_enabled()`, and CI checks that the control has the GIL enabled while the no-GIL workload has it disabled.
+
+The no-GIL result is informational rather than an SLO gate. The real application `/work` benchmark remains the capacity qualification test because it includes the HTTP and PostgreSQL path. This distinction matters because `/work` is currently I/O-heavy, where removing the GIL is expected to provide less benefit than in a pure-Python CPU-bound workload.

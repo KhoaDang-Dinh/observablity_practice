@@ -718,6 +718,683 @@ jobs:
                         memory: 512Mi
                     remoteWrite:
                       - url: http://mimir.observability.svc.cluster.local:9009/api/v1/push
+                        write_relabel_configs:
+                          - source_labels: [__name__]
+                            regex: '^(backend_.*|up|container_cpu_usage_seconds_total|container_memory_working_set_bytes|container_cpu_cfs_throttled_seconds_total|kube_pod_container_status_restarts_total|kube_pod_container_resource_requests|kube_deployment_spec_replicas|kube_deployment_status_replicas_available|node_cpu_seconds_total|node_memory_MemAvailable_bytes|node_memory_MemTotal_bytes|node_total_hourly_cost|node_cpu_hourly_cost|node_ram_hourly_cost|container_cpu_allocation|container_memory_allocation_bytes|kubecost_.*)
+                  kube-state-metrics:
+                    enabled: true
+                  prometheus-node-exporter:
+                    enabled: true
+                  extraScrapeConfigs: |
+                    - job_name: backend
+                      scrape_interval: 15s
+                      scrape_timeout: 5s
+                      metrics_path: /metrics
+                      scheme: http
+                      static_configs:
+                        - targets:
+                            - backend.application.svc.cluster.local:80
+                    - job_name: opencost
+                      honor_labels: true
+                      scrape_interval: 1m
+                      scrape_timeout: 10s
+                      metrics_path: /metrics
+                      scheme: http
+                      static_configs:
+                        - targets:
+                            - opencost.opencost.svc.cluster.local:9003
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: prometheus-system
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+          EOF
+
+      - name: Create or Update OpenCost Application
+        run: |
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: argoproj.io/v1alpha1
+          kind: Application
+          metadata:
+            name: opencost
+            namespace: argocd
+          spec:
+            project: default
+            source:
+              repoURL: https://opencost.github.io/opencost-helm-chart
+              chart: opencost
+              targetRevision: 2.5.31
+              helm:
+                releaseName: opencost
+                values: |
+                  clusterName: cluster.local
+                  podLabels:
+                    cost-project: day3-cicd-lgtm
+                    cost-component: opencost
+                    environment: dev
+                  opencost:
+                    mcp:
+                      enabled: false
+                    exporter:
+                      defaultClusterId: day3-observe
+                      resources:
+                        requests:
+                          cpu: 50m
+                          memory: 128Mi
+                        limits:
+                          cpu: 300m
+                          memory: 512Mi
+                    prometheus:
+                      internal:
+                        enabled: true
+                        serviceName: prometheus-server
+                        namespaceName: prometheus-system
+                        port: 80
+                        path: ""
+                        scheme: http
+                    ui:
+                      enabled: true
+                      resources:
+                        requests:
+                          cpu: 10m
+                          memory: 55Mi
+                        limits:
+                          memory: 256Mi
+                  service:
+                    type: ClusterIP
+            destination:
+              server: https://kubernetes.default.svc
+              namespace: opencost
+            syncPolicy:
+              automated:
+                prune: true
+                selfHeal: true
+              syncOptions:
+                - CreateNamespace=true
+          EOF
+
+      - name: Show Argo CD
+        run: |
+          kubectl get pods -n argocd
+          kubectl get application day3 -n argocd -o wide
+          kubectl get application loki -n argocd -o wide
+          kubectl get application opencost-prometheus -n argocd -o wide
+          kubectl get application opencost -n argocd -o wide
+
+  dynamic-analysis:
+    name: Dynamic Security and Performance Gate
+    runs-on: ubuntu-latest
+    needs: [infrastructure, build, kubernetes-bootstrap]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Configure EKS AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: predeploy-${{ github.run_id }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v5.1.0
+        with:
+          version: latest
+
+      - name: Configure EKS kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "${{ needs.infrastructure.outputs.cluster_name }}"
+
+      - name: Deploy isolated candidate
+        shell: bash
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          DB_ENDPOINT: ${{ needs.infrastructure.outputs.db_endpoint }}
+          DB_NAME: ${{ needs.infrastructure.outputs.db_name }}
+          DB_SECRET_ARN: ${{ needs.infrastructure.outputs.db_secret_arn }}
+        run: |
+          set -euo pipefail
+          NS="predeploy-${GITHUB_RUN_ID}"
+          echo "PREDEPLOY_NAMESPACE=$NS" >> "$GITHUB_ENV"
+
+          kubectl create namespace "$NS"
+
+          SECRET_JSON="$(aws secretsmanager get-secret-value \
+            --secret-id "$DB_SECRET_ARN" \
+            --query SecretString \
+            --output text)"
+          DB_USER="$(jq -r '.username' <<< "$SECRET_JSON")"
+          DB_PASSWORD="$(jq -r '.password' <<< "$SECRET_JSON")"
+          echo "::add-mask::$DB_USER"
+          echo "::add-mask::$DB_PASSWORD"
+
+          kubectl create secret generic rds-postgres -n "$NS" \
+            --from-literal=host="$DB_ENDPOINT" \
+            --from-literal=port="5432" \
+            --from-literal=database="$DB_NAME" \
+            --from-literal=username="$DB_USER" \
+            --from-literal=password="$DB_PASSWORD"
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: candidate-otel
+            namespace: ${NS}
+          data:
+            collector.yaml: |
+              receivers:
+                otlp:
+                  protocols:
+                    grpc:
+                      endpoint: 0.0.0.0:4317
+                    http:
+                      endpoint: 0.0.0.0:4318
+              processors:
+                memory_limiter:
+                  check_interval: 1s
+                  limit_mib: 192
+                  spike_limit_mib: 48
+                batch:
+                  timeout: 2s
+              exporters:
+                otlp/tempo:
+                  endpoint: tempo.observability.svc.cluster.local:4317
+                  tls:
+                    insecure: true
+                otlphttp/loki:
+                  endpoint: http://loki.observability.svc.cluster.local:3100/otlp
+                nop: {}
+              service:
+                pipelines:
+                  traces:
+                    receivers: [otlp]
+                    processors: [memory_limiter, batch]
+                    exporters: [otlp/tempo]
+                  metrics:
+                    receivers: [otlp]
+                    processors: [memory_limiter, batch]
+                    exporters: [nop]
+                  logs:
+                    receivers: [otlp]
+                    processors: [memory_limiter, batch]
+                    exporters: [otlphttp/loki]
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: backend-candidate
+            namespace: ${NS}
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: backend-candidate
+            template:
+              metadata:
+                labels:
+                  app: backend-candidate
+                  environment: predeploy
+              spec:
+                containers:
+                  - name: backend
+                    image: ${IMAGE}
+                    env:
+                      - name: OTEL_SERVICE_NAME
+                        value: backend-candidate
+                      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                        value: 127.0.0.1:4317
+                      - name: PYROSCOPE_SERVER_ADDRESS
+                        value: http://pyroscope.observability.svc.cluster.local:4040
+                      - name: SERVICE_VERSION
+                        value: ${GITHUB_SHA}
+                      - name: K8S_NAMESPACE
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.namespace
+                      - name: K8S_POD_NAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.name
+                      - name: K8S_POD_UID
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.uid
+                      - name: K8S_NODE_NAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: spec.nodeName
+                      - name: DB_HOST
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: host
+                      - name: DB_PORT
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: port
+                      - name: DB_NAME
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: database
+                      - name: DB_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: username
+                      - name: DB_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: rds-postgres
+                            key: password
+                    ports:
+                      - containerPort: 8080
+                        name: http
+                    readinessProbe:
+                      httpGet:
+                        path: /health
+                        port: http
+                      initialDelaySeconds: 3
+                      periodSeconds: 3
+                    resources:
+                      requests:
+                        cpu: 250m
+                        memory: 192Mi
+                      limits:
+                        cpu: "1"
+                        memory: 512Mi
+                  - name: otel-sidecar
+                    image: otel/opentelemetry-collector-contrib:0.161.0
+                    args:
+                      - --config=/etc/otelcol-contrib/collector.yaml
+                    resources:
+                      requests:
+                        cpu: 50m
+                        memory: 64Mi
+                      limits:
+                        cpu: 250m
+                        memory: 256Mi
+                    volumeMounts:
+                      - name: otel-config
+                        mountPath: /etc/otelcol-contrib
+                volumes:
+                  - name: otel-config
+                    configMap:
+                      name: candidate-otel
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: backend-candidate
+            namespace: ${NS}
+          spec:
+            selector:
+              app: backend-candidate
+            ports:
+              - port: 80
+                targetPort: http
+          EOF
+
+          kubectl rollout status deployment/backend-candidate -n "$NS" --timeout=5m
+
+      - name: DAST - OWASP ZAP API scan
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl port-forward -n "$PREDEPLOY_NAMESPACE" svc/backend-candidate 18080:80 >/tmp/predeploy-port-forward.log 2>&1 &
+          PF_PID=$!
+          trap 'kill "$PF_PID" >/dev/null 2>&1 || true' EXIT
+
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:18080/health >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:18080/health
+
+          docker run --rm --network host \
+            -v "$PWD:/zap/wrk:ro" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-api-scan.py \
+            -t /zap/wrk/tests/zap/openapi.yaml \
+            -f openapi \
+            -I
+
+      - name: Performance gate - k6
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl port-forward -n "$PREDEPLOY_NAMESPACE" svc/backend-candidate 18080:80 >/tmp/predeploy-k6-port-forward.log 2>&1 &
+          PF_PID=$!
+          trap 'kill "$PF_PID" >/dev/null 2>&1 || true' EXIT
+
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:18080/health >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+
+          docker run --rm --network host \
+            -e BASE_URL=http://127.0.0.1:18080 \
+            -v "$PWD:/work:ro" \
+            grafana/k6:latest \
+            run /work/tests/k6/predeploy.js
+
+      - name: Candidate resource snapshot
+        if: always()
+        shell: bash
+        run: |
+          kubectl top pods -n "$PREDEPLOY_NAMESPACE" --containers || true
+          kubectl get pods -n "$PREDEPLOY_NAMESPACE" -o wide || true
+          kubectl logs -n "$PREDEPLOY_NAMESPACE" deploy/backend-candidate -c backend --tail=80 || true
+
+      - name: Cleanup candidate namespace
+        if: always()
+        shell: bash
+        run: |
+          kubectl delete namespace "$PREDEPLOY_NAMESPACE" --wait=false --ignore-not-found=true
+
+  promote:
+    name: Promote Candidate to GitOps
+    runs-on: ubuntu-latest
+    needs: [build, dynamic-analysis]
+
+    steps:
+      - name: Checkout Dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Update GitOps manifest after gates pass
+        shell: bash
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          sed -i -E "s#image: .*/day3-backend:[^ ]+#image: ${IMAGE}#" deploy/dev/backend.yaml
+          sed -i -E "s#value: (bootstrap|[0-9a-f]{40})#value: ${GITHUB_SHA}#" deploy/dev/backend.yaml
+          grep "image:" deploy/dev/backend.yaml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deploy/dev/backend.yaml
+          if git diff --cached --quiet; then
+            echo "Desired state already current."
+            exit 0
+          fi
+          git commit -m "promote backend ${GITHUB_SHA} after security and performance gates [skip ci]"
+          git push origin HEAD:dev
+
+  verify:
+    name: Verify Deployment and Observability
+    runs-on: ubuntu-latest
+    needs: [infrastructure, kubernetes-bootstrap, promote]
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: verify-${{ github.run_id }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v5.1.0
+        with:
+          version: latest
+
+      - name: Configure EKS kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "${{ needs.infrastructure.outputs.cluster_name }}"
+
+      - name: Wait for Argo CD to Create Backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in {1..60}; do
+            if kubectl get deployment backend -n application >/dev/null 2>&1; then
+              echo "Backend Deployment exists."
+              exit 0
+            fi
+            echo "Waiting for Argo CD sync... $i/60"
+            sleep 10
+          done
+          echo "Backend Deployment was not created."
+          exit 1
+
+      - name: Wait for Promoted Image
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_TAG="${GITHUB_SHA}"
+          for i in {1..60}; do
+            CURRENT_IMAGE="$(kubectl get deployment backend -n application -o jsonpath='{.spec.template.spec.containers[?(@.name=="backend")].image}' 2>/dev/null || true)"
+            echo "Current image: ${CURRENT_IMAGE:-pending}"
+            if [[ "$CURRENT_IMAGE" == *":${EXPECTED_TAG}" ]]; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Argo CD did not deploy promoted image ${EXPECTED_TAG}."
+          exit 1
+
+      - name: Wait for Backend Rollout
+        run: |
+          kubectl rollout status deployment/backend -n application --timeout=10m
+
+      - name: Show Application
+        run: |
+          kubectl get pods -n application -o wide
+          kubectl get svc -n application
+
+      - name: Show Observability Stack
+        run: |
+          kubectl get pods -n observability -o wide || true
+          kubectl get svc -n observability || true
+
+      - name: Verify Loki Helm rollout
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! kubectl rollout status deployment/loki -n observability --timeout=2m; then
+            echo "=== Loki pods ==="
+            kubectl get pods -n observability -l app=loki -o wide || true
+            echo "=== Loki deployment ==="
+            kubectl describe deployment/loki -n observability || true
+            echo "=== Loki pod description ==="
+            kubectl describe pod -n observability -l app=loki || true
+            echo "=== Loki current logs ==="
+            kubectl logs -n observability -l app=loki --tail=200 || true
+            echo "=== Loki previous logs ==="
+            kubectl logs -n observability -l app=loki --previous --tail=200 || true
+            echo "=== Rendered Loki config ==="
+            kubectl get configmap loki-config -n observability -o jsonpath='{.data.loki\.yaml}' || true
+            exit 1
+          fi
+
+          CHECKSUM="$(kubectl get deployment loki -n observability -o jsonpath='{.spec.template.metadata.annotations.checksum/config}')"
+          test -n "$CHECKSUM"
+
+          kubectl get configmap loki-config -n observability             -o jsonpath='{.data.loki\.yaml}' | grep -q 'volume_enabled: true'
+
+          kubectl port-forward -n observability svc/loki 3100:3100 >/tmp/loki-port-forward.log 2>&1 &
+          PF_PID=$!
+          trap 'kill "$PF_PID" >/dev/null 2>&1 || true' EXIT
+
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:3100/ready >/dev/null; then
+              echo "Loki is ready with Helm config checksum $CHECKSUM"
+              kill "$PF_PID" >/dev/null 2>&1 || true
+              trap - EXIT
+              exit 0
+            fi
+            sleep 2
+          done
+
+          cat /tmp/loki-port-forward.log || true
+          exit 1
+
+      - name: Verify OpenCost and Prometheus
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl rollout status deployment/prometheus-server -n prometheus-system --timeout=5m
+
+          if ! kubectl rollout status deployment/opencost -n opencost --timeout=3m; then
+            echo "=== OpenCost pods ==="
+            kubectl get pods -n opencost -o wide || true
+            echo "=== OpenCost deployment ==="
+            kubectl describe deployment/opencost -n opencost || true
+            echo "=== OpenCost pod description ==="
+            kubectl describe pod -n opencost -l app.kubernetes.io/name=opencost || true
+            echo "=== OpenCost exporter logs ==="
+            kubectl logs -n opencost -l app.kubernetes.io/name=opencost -c opencost --tail=200 || true
+            echo "=== OpenCost UI logs ==="
+            kubectl logs -n opencost -l app.kubernetes.io/name=opencost -c opencost-ui --tail=100 || true
+            echo "=== OpenCost Prometheus endpoint ==="
+            kubectl get deployment opencost -n opencost               -o jsonpath='{.spec.template.spec.containers[?(@.name=="opencost")].env[?(@.name=="PROMETHEUS_SERVER_ENDPOINT")].value}{"\n"}' || true
+            exit 1
+          fi
+
+          kubectl port-forward -n opencost svc/opencost 9003:9003 >/tmp/opencost-port-forward.log 2>&1 &
+          OC_PID=$!
+          trap 'kill "$OC_PID" >/dev/null 2>&1 || true' EXIT
+
+          OPEN_COST_OK=false
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:9003/healthz >/dev/null 2>&1; then
+              METRICS="$(curl -fsS http://127.0.0.1:9003/metrics 2>/dev/null || true)"
+              if grep -Eq 'node_total_hourly_cost|kubecost' <<< "$METRICS"; then
+                echo "OpenCost API and metrics are healthy."
+                OPEN_COST_OK=true
+                break
+              fi
+            fi
+            sleep 2
+          done
+
+          kill "$OC_PID" >/dev/null 2>&1 || true
+          trap - EXIT
+
+          if [ "$OPEN_COST_OK" != "true" ]; then
+            echo "OpenCost did not expose expected cost metrics."
+            cat /tmp/opencost-port-forward.log || true
+            exit 1
+          fi
+
+          kubectl port-forward -n prometheus-system svc/prometheus-server 9090:80 >/tmp/prometheus-port-forward.log 2>&1 &
+          PROM_PID=$!
+          trap 'kill "$PROM_PID" >/dev/null 2>&1 || true' EXIT
+
+          for i in {1..30}; do
+            RESPONSE="$(curl -fsSG http://127.0.0.1:9090/api/v1/query               --data-urlencode 'query=up{job="opencost"}' 2>/dev/null || true)"
+            if echo "$RESPONSE" | jq -e '.status == "success" and (.data.result | length > 0)' >/dev/null; then
+              echo "Prometheus is scraping OpenCost."
+              kill "$PROM_PID" >/dev/null 2>&1 || true
+              trap - EXIT
+              exit 0
+            fi
+            sleep 2
+          done
+
+          cat /tmp/prometheus-port-forward.log || true
+          exit 1
+
+      - name: Print Public Endpoints
+        shell: bash
+        run: |
+          set -u
+          APP_HOST=""
+          GRAFANA_HOST=""
+
+          for i in {1..60}; do
+            APP_HOST="$(kubectl get svc backend -n application -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+            if [ -z "$APP_HOST" ]; then
+              APP_HOST="$(kubectl get svc backend -n application -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+            fi
+
+            GRAFANA_HOST="$(kubectl get svc grafana-public -n observability -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+            if [ -z "$GRAFANA_HOST" ]; then
+              GRAFANA_HOST="$(kubectl get svc grafana-public -n observability -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)"
+            fi
+
+            if [ -n "$APP_HOST" ] && [ -n "$GRAFANA_HOST" ]; then
+              break
+            fi
+
+            echo "Waiting for AWS load balancer endpoints... $i/60"
+            sleep 10
+          done
+
+          echo "========================================"
+          echo "PUBLIC ENDPOINTS"
+          echo "========================================"
+
+          if [ -n "$APP_HOST" ]; then
+            echo "App:     http://${APP_HOST}"
+          else
+            echo "App:     endpoint still pending"
+          fi
+
+          if [ -n "$GRAFANA_HOST" ]; then
+            echo "Grafana: http://${GRAFANA_HOST}"
+          else
+            echo "Grafana: endpoint still pending"
+          fi
+
+          echo "RDS:     ${{ needs.infrastructure.outputs.db_endpoint }}:5432 (private)"
+
+          {
+            echo "## EKS public endpoints"
+            echo
+            if [ -n "$APP_HOST" ]; then
+              echo "- App: http://${APP_HOST}"
+              echo "- DB check: http://${APP_HOST}/db"
+            else
+              echo "- App: endpoint still pending"
+            fi
+            if [ -n "$GRAFANA_HOST" ]; then
+              echo "- Grafana: http://${GRAFANA_HOST}"
+            else
+              echo "- Grafana: endpoint still pending"
+            fi
+            echo "- RDS: ${{ needs.infrastructure.outputs.db_endpoint }}:5432 (private VPC endpoint)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Resource Usage
+        run: |
+          echo "=== APPLICATION ==="
+          kubectl top pods -n application || true
+          echo "=== OBSERVABILITY ==="
+          kubectl top pods -n observability || true
+          echo "=== NODES ==="
+          kubectl top nodes || true
+
+      - name: Show Argo CD Application Status
+        run: |
+          kubectl get application day3 -n argocd -o wide
+          kubectl get application day3 -n argocd \
+            -o jsonpath='Sync: {.status.sync.status}{"\n"}Health: {.status.health.status}{"\n"}' \
+            || true
+
+                            action: keep
                   kube-state-metrics:
                     enabled: true
                   prometheus-node-exporter:

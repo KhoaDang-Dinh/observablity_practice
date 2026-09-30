@@ -146,3 +146,14 @@ variable "db_backup_retention_days" {
     error_message = "db_backup_retention_days must be between 1 and 35."
   }
 }
+
+variable "az_failure_duration_minutes" {
+  description = "Duration of the FIS AZ failure drill. The ASG launch fault remains active for this long while subnet connectivity is disrupted for the first 2 minutes."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.az_failure_duration_minutes >= 2 && var.az_failure_duration_minutes <= 30
+    error_message = "az_failure_duration_minutes must be between 2 and 30."
+  }
+}

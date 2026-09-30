@@ -1376,6 +1376,8 @@ spec:
               mountPath: /etc/grafana/provisioning/dashboards
             - name: core-dashboard
               mountPath: /var/lib/grafana/dashboards/core
+            - name: alerting
+              mountPath: /etc/grafana/provisioning/alerting
       volumes:
         - name: datasources
           configMap:
@@ -1386,3 +1388,6 @@ spec:
         - name: core-dashboard
           configMap:
             name: grafana-core-dashboard
+        - name: alerting
+          configMap:
+            name: grafana-alerting

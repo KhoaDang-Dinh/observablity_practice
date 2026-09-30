@@ -4,5 +4,6 @@ resources:
   - backend-otel-rbac.yaml
   - native-observability.yaml
   - grafana-core-dashboard.yaml
+  - grafana-alerting.yaml
   - grafana-public.yaml
   - backend.yaml

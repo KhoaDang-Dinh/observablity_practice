@@ -720,7 +720,8 @@ jobs:
                       - url: http://mimir.observability.svc.cluster.local:9009/api/v1/push
                         write_relabel_configs:
                           - source_labels: [__name__]
-                            regex: '^(backend_.*|up|container_cpu_usage_seconds_total|container_memory_working_set_bytes|container_cpu_cfs_throttled_seconds_total|kube_pod_container_status_restarts_total|kube_pod_container_resource_requests|kube_deployment_spec_replicas|kube_deployment_status_replicas_available|node_cpu_seconds_total|node_memory_MemAvailable_bytes|node_memory_MemTotal_bytes|node_total_hourly_cost|node_cpu_hourly_cost|node_ram_hourly_cost|container_cpu_allocation|container_memory_allocation_bytes|kubecost_.*)
+                            regex: "^(backend_.*|up|container_cpu_usage_seconds_total|container_memory_working_set_bytes|container_cpu_cfs_throttled_seconds_total|kube_pod_container_status_restarts_total|kube_pod_container_resource_requests|kube_deployment_spec_replicas|kube_deployment_status_replicas_available|node_cpu_seconds_total|node_memory_MemAvailable_bytes|node_memory_MemTotal_bytes|node_total_hourly_cost|node_cpu_hourly_cost|node_ram_hourly_cost|container_cpu_allocation|container_memory_allocation_bytes|kubecost_.*)$"
+                            action: keep
                   kube-state-metrics:
                     enabled: true
                   prometheus-node-exporter:

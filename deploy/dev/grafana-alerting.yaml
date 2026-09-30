@@ -1,0 +1,294 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-alerting
+  namespace: observability
+data:
+  alert-rules.yaml: |
+    apiVersion: v1
+    groups:
+      - orgId: 1
+        name: EKS availability
+        folder: Infrastructure
+        interval: 1m
+        rules:
+          - uid: backend_down
+            title: Backend deployment unavailable
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: mimir
+                model:
+                  expr: 'max(kube_deployment_status_replicas_available{namespace="application",deployment="backend"})'
+                  refId: A
+              - refId: B
+                relativeTimeRange:
+                  from: 0
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: reduce
+                  expression: A
+                  reducer: last
+                  refId: B
+              - refId: C
+                relativeTimeRange:
+                  from: 0
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: threshold
+                  expression: B
+                  conditions:
+                    - evaluator:
+                        type: lt
+                        params: [1]
+                  refId: C
+            noDataState: Alerting
+            execErrState: Error
+            for: 2m
+            annotations:
+              summary: Backend deployment has no available replicas
+              description: The application/backend deployment has had fewer than one available replica for at least 2 minutes.
+            labels:
+              severity: critical
+              component: backend
+    
+          - uid: backend_scrape_down
+            title: Backend metrics endpoint unreachable
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: mimir
+                model:
+                  expr: 'max(up{job="backend"})'
+                  refId: A
+              - refId: B
+                relativeTimeRange:
+                  from: 0
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: reduce
+                  expression: A
+                  reducer: last
+                  refId: B
+              - refId: C
+                relativeTimeRange:
+                  from: 0
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: threshold
+                  expression: B
+                  conditions:
+                    - evaluator:
+                        type: lt
+                        params: [1]
+                  refId: C
+            noDataState: Alerting
+            execErrState: Error
+            for: 2m
+            annotations:
+              summary: Prometheus cannot scrape the backend
+              description: The backend /metrics target has been unreachable or missing for at least 2 minutes.
+            labels:
+              severity: critical
+              component: backend
+    
+          - uid: eks_node_not_ready
+            title: EKS worker node NotReady
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: mimir
+                model:
+                  expr: 'min by (node) (kube_node_status_condition{condition="Ready",status="true"})'
+                  refId: A
+              - refId: B
+                relativeTimeRange:
+                  from: 0
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: reduce
+                  expression: A
+                  reducer: last
+                  refId: B
+              - refId: C
+                relativeTimeRange:
+                  from: 0
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: threshold
+                  expression: B
+                  conditions:
+                    - evaluator:
+                        type: lt
+                        params: [1]
+                  refId: C
+            noDataState: Alerting
+            execErrState: Error
+            for: 2m
+            annotations:
+              summary: EKS worker node is not Ready
+              description: 'Node {{ $labels.node }} has been NotReady for at least 2 minutes. Check the EC2 instance, kubelet, networking, and node group.'
+            labels:
+              severity: critical
+              component: eks-node
+    
+      - orgId: 1
+        name: EKS capacity
+        folder: Infrastructure
+        interval: 1m
+        rules:
+          - uid: node_cpu_high
+            title: EKS node CPU high
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                datasourceUid: mimir
+                model:
+                  expr: '100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])))'
+                  refId: A
+              - refId: B
+                relativeTimeRange:
+                  from: 0
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: reduce
+                  expression: A
+                  reducer: last
+                  refId: B
+              - refId: C
+                relativeTimeRange:
+                  from: 0
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: threshold
+                  expression: B
+                  conditions:
+                    - evaluator:
+                        type: gt
+                        params: [85]
+                  refId: C
+            noDataState: OK
+            execErrState: Error
+            for: 10m
+            annotations:
+              summary: EKS node CPU above 85%
+              description: 'Node exporter instance {{ $labels.instance }} has been above 85% CPU for at least 10 minutes.'
+            labels:
+              severity: warning
+              component: eks-node
+    
+          - uid: node_memory_high
+            title: EKS node memory high
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 600
+                  to: 0
+                datasourceUid: mimir
+                model:
+                  expr: '100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))'
+                  refId: A
+              - refId: B
+                relativeTimeRange:
+                  from: 0
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: reduce
+                  expression: A
+                  reducer: last
+                  refId: B
+              - refId: C
+                relativeTimeRange:
+                  from: 0
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: threshold
+                  expression: B
+                  conditions:
+                    - evaluator:
+                        type: gt
+                        params: [90]
+                  refId: C
+            noDataState: OK
+            execErrState: Error
+            for: 10m
+            annotations:
+              summary: EKS node memory above 90%
+              description: 'Node exporter instance {{ $labels.instance }} has been above 90% memory usage for at least 10 minutes.'
+            labels:
+              severity: warning
+              component: eks-node
+    
+      - orgId: 1
+        name: Observability health
+        folder: Infrastructure
+        interval: 1m
+        rules:
+          - uid: mimir_unavailable
+            title: Mimir datasource unavailable
+            condition: C
+            data:
+              - refId: A
+                relativeTimeRange:
+                  from: 300
+                  to: 0
+                datasourceUid: mimir
+                model:
+                  expr: 'vector(1)'
+                  refId: A
+              - refId: B
+                relativeTimeRange:
+                  from: 0
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: reduce
+                  expression: A
+                  reducer: last
+                  refId: B
+              - refId: C
+                relativeTimeRange:
+                  from: 0
+                  to: 0
+                datasourceUid: __expr__
+                model:
+                  type: threshold
+                  expression: B
+                  conditions:
+                    - evaluator:
+                        type: lt
+                        params: [1]
+                  refId: C
+            noDataState: Alerting
+            execErrState: Alerting
+            for: 1m
+            annotations:
+              summary: Grafana cannot query Mimir
+              description: The Mimir datasource has failed or returned no data for at least one minute.
+            labels:
+              severity: critical
+              component: mimir
+    

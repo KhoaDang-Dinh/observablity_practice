@@ -86,7 +86,7 @@ output "recovery_profile" {
 
 output "fis_az_experiment_template_ids" {
   description = "AWS FIS AZ failure experiment template IDs keyed by Availability Zone."
-  value       = { for az, template in aws_fis_experiment_template.az_failure : az => template.id }
+  value       = {}
 }
 
 output "fis_experiment_role_arn" {

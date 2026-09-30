@@ -365,15 +365,15 @@ data:
   dashboards.yaml: |
     apiVersion: 1
     providers:
-      - name: OpenCost
+      - name: Core
         orgId: 1
-        folder: FinOps
+        folder: Core
         type: file
         disableDeletion: false
         allowUiUpdates: true
         updateIntervalSeconds: 10
         options:
-          path: /var/lib/grafana/dashboards/opencost
+          path: /var/lib/grafana/dashboards/core
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1374,8 +1374,8 @@ spec:
               mountPath: /etc/grafana/provisioning/datasources
             - name: dashboard-providers
               mountPath: /etc/grafana/provisioning/dashboards
-            - name: opencost-dashboard
-              mountPath: /var/lib/grafana/dashboards/opencost
+            - name: core-dashboard
+              mountPath: /var/lib/grafana/dashboards/core
       volumes:
         - name: datasources
           configMap:
@@ -1383,6 +1383,6 @@ spec:
         - name: dashboard-providers
           configMap:
             name: grafana-dashboard-providers
-        - name: opencost-dashboard
+        - name: core-dashboard
           configMap:
-            name: grafana-opencost-dashboard
+            name: grafana-core-dashboard
